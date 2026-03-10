@@ -86,6 +86,7 @@ export async function syncCommand(options: SyncCommandOptions): Promise<void> {
     meta.prefix,
     config.loka.statusMap,
     config.loka.priorityMap,
+    { name: meta.name, description: '' },
   );
 
   const engine = new SyncEngine(fileProvider, lokaProvider, afPath);

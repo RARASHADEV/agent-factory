@@ -37,4 +37,7 @@ export const PROJECT_STATUSES = ['inception', 'active', 'paused', 'archived'] as
 export const ENABLE_AF_8 = false;
 
 /** AF-12: Bidirectional Loka sync. When false, sync command and Loka activity posting are disabled. */
-export const ENABLE_AF_12 = false;
+export const ENABLE_AF_12 = true;
+
+/** AF-13: Auto-create Loka project + inline sync on task mutations. When false, preserves original throw behavior. */
+export const ENABLE_AF_13 = false;

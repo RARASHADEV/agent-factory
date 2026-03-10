@@ -10,8 +10,10 @@ import {
   TaskUpdateInput,
   TaskNotFoundError,
   ProviderError,
+  LokaUnreachableError,
 } from '../task-provider.js';
 import { LokaHttpClient } from './loka-http-client.js';
+import { ENABLE_AF_13 } from '../constants.js';
 
 // ── Loka API shapes ────────────────────────────────────────────────────────
 
@@ -94,6 +96,7 @@ export class LokaProvider implements TaskProvider {
     private projectPrefix: string,
     private statusMapOverrides?: Record<string, string>,
     private priorityMapOverrides?: Record<string, string>,
+    private projectMeta?: { name: string; description?: string },
   ) {
     this.client = new LokaHttpClient({ baseUrl, apiKey });
   }
@@ -109,9 +112,29 @@ export class LokaProvider implements TaskProvider {
     if (!projects || !Array.isArray(projects)) {
       throw new ProviderError('Failed to load Loka projects');
     }
-    const project = projects.find(p => p.prefix === this.projectPrefix);
+    let project = projects.find(p => p.prefix === this.projectPrefix);
     if (!project) {
-      throw new ProviderError(`Loka project with prefix "${this.projectPrefix}" not found`);
+      if (ENABLE_AF_13 && this.projectMeta) {
+        process.stderr.write(`[loka] Project "${this.projectPrefix}" not found in Loka — creating it...\n`);
+        try {
+          const created = await this.client.post<LokaProject>('/projects', {
+            name: this.projectMeta.name,
+            prefix: this.projectPrefix,
+            description: this.projectMeta.description ?? '',
+          });
+          project = created;
+          process.stderr.write(`[loka] Auto-created project "${created.name}" (${created.prefix}) in Loka\n`);
+        } catch (err: any) {
+          if (err instanceof LokaUnreachableError) {
+            throw err;
+          }
+          throw new ProviderError(
+            `Failed to auto-create Loka project "${this.projectPrefix}": ${err?.message ?? String(err)}`
+          );
+        }
+      } else {
+        throw new ProviderError(`Loka project with prefix "${this.projectPrefix}" not found`);
+      }
     }
     this.projectId = project.id;
 
