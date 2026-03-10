@@ -200,6 +200,9 @@ export class LokaProvider implements TaskProvider {
       if (Array.isArray(page)) {
         items = page;
         total = page.length;
+      } else if (page && typeof page === 'object' && 'tasks' in page) {
+        items = (page as any).tasks;
+        total = (page as any).total ?? items.length;
       } else if (page && typeof page === 'object' && 'items' in page) {
         items = page.items;
         total = page.total;
@@ -248,11 +251,20 @@ export class LokaProvider implements TaskProvider {
       ticketNumber: numStr,
     };
 
-    const result = await this.client.get<LokaFlatTask[] | null>('/tasks', params);
-    if (!result || (Array.isArray(result) && result.length === 0)) return null;
+    const result = await this.client.get<LokaFlatTask[] | { tasks: LokaFlatTask[] } | null>('/tasks', params);
+    if (!result) return null;
 
-    const task = Array.isArray(result) ? result[0] : result;
-    return task ? this.toTask(task) : null;
+    let tasks: LokaFlatTask[];
+    if (Array.isArray(result)) {
+      tasks = result;
+    } else if ('tasks' in result) {
+      tasks = result.tasks;
+    } else {
+      return null;
+    }
+
+    if (tasks.length === 0) return null;
+    return this.toTask(tasks[0]);
   }
 
   // ── create ────────────────────────────────────────────────────────────────
@@ -277,6 +289,11 @@ export class LokaProvider implements TaskProvider {
       tags,
     };
     if (statusId) body.statusId = statusId;
+    // Preserve AF ticket numbering in Loka
+    if (input.ticket) {
+      const match = input.ticket.match(/^[A-Za-z]+-(\d+)$/);
+      if (match) body.ticketNumber = parseInt(match[1], 10);
+    }
 
     const created = await this.client.post<LokaFlatTask>('/tasks', body);
     return this.toTask(created);

@@ -12,9 +12,7 @@ import { FileProvider } from './providers/file-provider.js';
 import { type ProjectMeta } from './workspace.js';
 import { type TaskCreateInput } from './task-provider.js';
 
-// Augmented create input that carries the locally-assigned ticket number
-// so LokaProvider can preserve it via body.ticketNumber.
-type CreateInputWithTicket = TaskCreateInput & { ticket?: string };
+
 
 /**
  * Unified post-action sync hook.
@@ -27,7 +25,7 @@ export async function postActionSync(
   ticket: string,
   action: 'create' | 'move' | 'assign' | 'log' | 'edit',
   context?: {
-    createInput?: CreateInputWithTicket;  // only for action='create'
+    createInput?: TaskCreateInput;  // only for action='create'
     targetStatus?: string;               // only for action='move'
     logEntry?: string;                   // only for action='log'
   },
@@ -55,7 +53,7 @@ export async function postActionSync(
     switch (action) {
       case 'create':
         if (context?.createInput) {
-          await lokaProvider.create(context.createInput);
+          await lokaProvider.create({ ...context.createInput, ticket });
         }
         break;
 

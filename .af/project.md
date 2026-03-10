@@ -5,8 +5,8 @@ prefix: AF
 status: active
 owner: brahma
 created: '2026-03-07'
-counter: 12
-stack: typescript, node, claude-sdk
+counter: 17
+stack: 'typescript, node, claude-sdk'
 ---
 
 # Agent Factory
