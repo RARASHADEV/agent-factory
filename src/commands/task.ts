@@ -1,5 +1,5 @@
 import { readFileSync } from 'fs';
-import { resolveProject } from '../lib/workspace.js';
+import { resolveProject, type ProjectMeta } from '../lib/workspace.js';
 import { type TaskStatus } from '../lib/constants.js';
 import { formatTaskLine, success, error, dim, heading } from '../lib/format.js';
 import { auditLog } from '../lib/audit.js';

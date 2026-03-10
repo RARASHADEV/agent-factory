@@ -1,0 +1,34 @@
+---
+ticket: AF-5
+title: Redesign engineer agent prompt
+type: feature
+status: released
+priority: medium
+complexity: medium
+created: '2026-03-10'
+updated: '2026-03-10'
+design: docs/designs/engineer-v2.md
+depends:
+  - AF-6
+loka-ref: a580a482-49d2-49e4-b65a-59030a9db0cc
+---
+
+# Redesign engineer agent prompt
+
+## Objective
+
+Replace current engineer.md with v2 prompt that references `## Project` for project-specific rules, adds structured logging, environment awareness, and clean finish protocol. Make the engineer role generic enough to work across any project when combined with that project's `project.md`.
+
+## Context
+
+Current engineer prompt has project-specific assumptions baked in. V2 separates concerns: generic role (engineer.md) + project-specific way of working (project.md). Design doc at `docs/designs/engineer-v2.md`.
+
+## Acceptance
+- [x] Engineer prompt updated to v2 spec
+- [x] References `## Project` section (injected from project.md at spawn time)
+- [x] Structured log format defined and documented
+- [x] Environment awareness section present
+- [x] Finish protocol matches project's way of working
+- [x] Tested: spawn engineer on AF project, verify it reads project.md correctly
+
+## Log

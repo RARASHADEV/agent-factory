@@ -20,6 +20,7 @@ export interface TaskCreateInput {
   due?: string;          // YYYY-MM-DD
   description?: string;  // markdown body
   design?: string;       // path to design doc (relative to project root)
+  ticket?: string;       // preserve existing ticket number (e.g. during sync)
 }
 
 export interface TaskUpdateInput {
