@@ -20,6 +20,7 @@ import {
   agentStatusCommand,
 } from './commands/agent.js';
 import { syncCommand } from './commands/sync.js';
+import { webhookServeCommand } from './commands/webhook.js';
 
 const program = new Command();
 
@@ -149,5 +150,25 @@ program
   .option('-v, --verbose', 'Show per-task sync details')
   .option('-p, --project <prefix>', 'Project prefix')
   .action(syncCommand);
+
+// --- Webhook command (AF-18) ---
+
+const webhook = program
+  .command('webhook')
+  .description('Webhook listener for Loka → AF sync');
+
+webhook
+  .command('serve')
+  .description('Start webhook listener for Loka → AF sync')
+  .option('-p, --port <port>', 'Port to listen on (default: 4100)')
+  .option('--project <prefix>', 'Restrict to a single project prefix')
+  .option('-v, --verbose', 'Verbose logging')
+  .action(async (opts) => {
+    await webhookServeCommand({
+      port: opts.port ? parseInt(opts.port, 10) : undefined,
+      project: opts.project,
+      verbose: opts.verbose ?? false,
+    });
+  });
 
 program.parse();

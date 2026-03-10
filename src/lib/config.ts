@@ -22,6 +22,13 @@ export interface LokaConfig {
     /** Auto-post agent activity as Loka comments. Default: true */
     postActivity?: boolean;
   };
+  /** Webhook listener settings */
+  webhook?: {
+    /** Shared secret for HMAC-SHA256 signature verification */
+    secret: string;
+    /** Port to listen on. Default: 4100 */
+    port?: number;
+  };
 }
 
 export interface GlobalConfig {

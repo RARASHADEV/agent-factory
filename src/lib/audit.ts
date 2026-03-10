@@ -15,7 +15,9 @@ export type AuditEvent =
   | 'spawn.status_check'
   | 'agent.sync'
   | 'sync.complete'
-  | 'sync.error';
+  | 'sync.error'
+  | 'webhook.receive'
+  | 'webhook.error';
 
 export interface AuditEntry {
   timestamp: string;        // ISO 8601
