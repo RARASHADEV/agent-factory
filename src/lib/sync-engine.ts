@@ -8,6 +8,7 @@ import matter from 'gray-matter';
 import { Task, TaskUpdateInput } from './task-provider.js';
 import { FileProvider } from './providers/file-provider.js';
 import { LokaProvider } from './providers/loka-provider.js';
+import { ENABLE_AF_13 } from './constants.js';
 
 export type SyncMode = 'push' | 'pull' | 'bidirectional';
 
@@ -68,6 +69,11 @@ export class SyncEngine {
       process.stdout.write(`[sync] Loaded ${localTasks.length} local, ${remoteTasks.length} remote tasks\n`);
     }
 
+    // 1b. Sync counters: advance local counter to max(local, remote) before reconciliation
+    if (ENABLE_AF_13 && remoteTasks.length > 0) {
+      await this.syncCounters(remoteTasks);
+    }
+
     // 2. Build index maps
     const localByTicket = new Map<string, Task>();
     const localByLokaRef = new Map<string, Task>();
@@ -120,73 +126,123 @@ export class SyncEngine {
       matchedLocalTickets.add(local.ticket);
 
       // EXISTING: task in both systems — reconcile
-      const conflictOutcome = resolveConflict(local, remote);
-
-      if (conflictOutcome === 'no-change') {
-        if (verbose) process.stdout.write(`[sync] No change: ${local.ticket}\n`);
-        // Still ensure loka-ref is set
-        if (!local.lokaRef && remote.externalId && !dryRun) {
-          await this.fileProvider.update(local.ticket, { lokaRef: remote.externalId }).catch(() => {});
-        }
-        continue;
-      }
-
-      if (mode === 'push') {
-        // Push local to remote regardless of who's newer
-        if (verbose) process.stdout.write(`[sync] Push ${local.ticket} → Loka\n`);
-        if (!dryRun) {
-          try {
-            await this.pushToLoka(local, remote);
-            result.pushed.push(local.ticket);
-          } catch (err: any) {
-            result.errors.push({ ticket: local.ticket, message: `Push failed: ${err.message}` });
+      // AF-13: mode-aware conflict resolution — check mode FIRST for push/pull
+      if (ENABLE_AF_13 && (mode === 'push' || mode === 'pull')) {
+        if (mode === 'push') {
+          // Push mode: push local to remote based on field differences, not timestamps
+          const hasFieldDiff = hasContentDifference(local, remote);
+          if (!hasFieldDiff) {
+            if (verbose) process.stdout.write(`[sync] No field changes: ${local.ticket}\n`);
+            // Still ensure loka-ref is set
+            if (!local.lokaRef && remote.externalId && !dryRun) {
+              await this.fileProvider.update(local.ticket, { lokaRef: remote.externalId }).catch(() => {});
+            }
+            continue;
           }
-        } else {
-          result.pushed.push(local.ticket);
-        }
-      } else if (mode === 'pull') {
-        // Pull remote to local regardless of who's newer
-        if (verbose) process.stdout.write(`[sync] Pull ${remote.ticket} → local\n`);
-        if (!dryRun) {
-          try {
-            await this.pullToLocal(local, remote);
-            result.pulled.push(local.ticket);
-          } catch (err: any) {
-            result.errors.push({ ticket: local.ticket, message: `Pull failed: ${err.message}` });
-          }
-        } else {
-          result.pulled.push(local.ticket);
-        }
-      } else {
-        // bidirectional: Last-Write-Wins
-        if (conflictOutcome === 'local-wins') {
-          if (verbose) process.stdout.write(`[sync] LWW local wins: ${local.ticket} (push)\n`);
+          if (verbose) process.stdout.write(`[sync] Push ${local.ticket} → Loka\n`);
           if (!dryRun) {
             try {
               await this.pushToLoka(local, remote);
               result.pushed.push(local.ticket);
-              result.conflicts.push(local.ticket);
             } catch (err: any) {
               result.errors.push({ ticket: local.ticket, message: `Push failed: ${err.message}` });
             }
           } else {
             result.pushed.push(local.ticket);
-            result.conflicts.push(local.ticket);
           }
         } else {
-          // remote-wins
-          if (verbose) process.stdout.write(`[sync] LWW remote wins: ${local.ticket} (pull)\n`);
+          // Pull mode: pull remote to local based on field differences, not timestamps
+          const hasFieldDiff = hasContentDifference(local, remote);
+          if (!hasFieldDiff) {
+            if (verbose) process.stdout.write(`[sync] No field changes: ${local.ticket}\n`);
+            // Still ensure loka-ref is set
+            if (!local.lokaRef && remote.externalId && !dryRun) {
+              await this.fileProvider.update(local.ticket, { lokaRef: remote.externalId }).catch(() => {});
+            }
+            continue;
+          }
+          if (verbose) process.stdout.write(`[sync] Pull ${remote.ticket} → local\n`);
           if (!dryRun) {
             try {
               await this.pullToLocal(local, remote);
               result.pulled.push(local.ticket);
-              result.conflicts.push(local.ticket);
             } catch (err: any) {
               result.errors.push({ ticket: local.ticket, message: `Pull failed: ${err.message}` });
             }
           } else {
             result.pulled.push(local.ticket);
-            result.conflicts.push(local.ticket);
+          }
+        }
+      } else {
+        // Bidirectional (or flag off): use timestamp-based LWW
+        const conflictOutcome = resolveConflict(local, remote);
+
+        if (conflictOutcome === 'no-change') {
+          if (verbose) process.stdout.write(`[sync] No change: ${local.ticket}\n`);
+          // Still ensure loka-ref is set
+          if (!local.lokaRef && remote.externalId && !dryRun) {
+            await this.fileProvider.update(local.ticket, { lokaRef: remote.externalId }).catch(() => {});
+          }
+          continue;
+        }
+
+        if (mode === 'push') {
+          // Push local to remote regardless of who's newer (flag-off path)
+          if (verbose) process.stdout.write(`[sync] Push ${local.ticket} → Loka\n`);
+          if (!dryRun) {
+            try {
+              await this.pushToLoka(local, remote);
+              result.pushed.push(local.ticket);
+            } catch (err: any) {
+              result.errors.push({ ticket: local.ticket, message: `Push failed: ${err.message}` });
+            }
+          } else {
+            result.pushed.push(local.ticket);
+          }
+        } else if (mode === 'pull') {
+          // Pull remote to local regardless of who's newer (flag-off path)
+          if (verbose) process.stdout.write(`[sync] Pull ${remote.ticket} → local\n`);
+          if (!dryRun) {
+            try {
+              await this.pullToLocal(local, remote);
+              result.pulled.push(local.ticket);
+            } catch (err: any) {
+              result.errors.push({ ticket: local.ticket, message: `Pull failed: ${err.message}` });
+            }
+          } else {
+            result.pulled.push(local.ticket);
+          }
+        } else {
+          // bidirectional: Last-Write-Wins
+          if (conflictOutcome === 'local-wins') {
+            if (verbose) process.stdout.write(`[sync] LWW local wins: ${local.ticket} (push)\n`);
+            if (!dryRun) {
+              try {
+                await this.pushToLoka(local, remote);
+                result.pushed.push(local.ticket);
+                result.conflicts.push(local.ticket);
+              } catch (err: any) {
+                result.errors.push({ ticket: local.ticket, message: `Push failed: ${err.message}` });
+              }
+            } else {
+              result.pushed.push(local.ticket);
+              result.conflicts.push(local.ticket);
+            }
+          } else {
+            // remote-wins
+            if (verbose) process.stdout.write(`[sync] LWW remote wins: ${local.ticket} (pull)\n`);
+            if (!dryRun) {
+              try {
+                await this.pullToLocal(local, remote);
+                result.pulled.push(local.ticket);
+                result.conflicts.push(local.ticket);
+              } catch (err: any) {
+                result.errors.push({ ticket: local.ticket, message: `Pull failed: ${err.message}` });
+              }
+            } else {
+              result.pulled.push(local.ticket);
+              result.conflicts.push(local.ticket);
+            }
           }
         }
       }
@@ -209,6 +265,7 @@ export class SyncEngine {
               due: local.due,
               description: local.description,
               design: local.design,
+              ticket: local.ticket,  // AF-13: preserve AF's ticket number in Loka
             });
             // Store loka-ref
             await this.fileProvider.update(local.ticket, { lokaRef: remote.externalId });
@@ -334,6 +391,24 @@ export class SyncEngine {
   }
 
   /**
+   * Advance the local counter to max(localCounter, maxRemoteTicketNumber + 1).
+   * Ensures any subsequent local task creation won't collide with known Loka tasks.
+   */
+  private async syncCounters(remoteTasks: Task[]): Promise<void> {
+    let maxRemote = 0;
+    for (const t of remoteTasks) {
+      const match = t.ticket.match(/^[A-Za-z]+-(\d+)$/);
+      if (match) {
+        const num = parseInt(match[1], 10);
+        if (num > maxRemote) maxRemote = num;
+      }
+    }
+    if (maxRemote > 0) {
+      await this.advanceCounterIfNeeded('*', `X-${maxRemote}`, maxRemote);
+    }
+  }
+
+  /**
    * Advance the project.md counter if a Loka ticket number is >= current counter.
    */
   private async advanceCounterIfNeeded(
@@ -363,6 +438,24 @@ export class SyncEngine {
       // Non-fatal
     }
   }
+}
+
+/**
+ * Compare task fields to determine if there's a meaningful content difference.
+ * Used by push/pull modes to avoid unnecessary API calls when fields are identical.
+ * Ignores timestamps — only compares actual content fields.
+ */
+export function hasContentDifference(local: Task, remote: Task): boolean {
+  if (local.title !== remote.title) return true;
+  if (local.status !== remote.status) return true;
+  if (local.priority !== remote.priority) return true;
+  if ((local.assignee ?? null) !== (remote.assignee ?? null)) return true;
+  if ((local.due ?? null) !== (remote.due ?? null)) return true;
+  // Description comparison: normalize whitespace
+  const localDesc = (local.description ?? '').trim();
+  const remoteDesc = (remote.description ?? '').trim();
+  if (localDesc !== remoteDesc) return true;
+  return false;
 }
 
 /**
