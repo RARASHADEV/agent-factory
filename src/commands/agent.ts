@@ -383,7 +383,7 @@ export async function agentSpawnCommand(slug: string, options: SpawnOptions): Pr
 
   if (options.background) {
     // ── Background mode: use SDK via detached subprocess ─────────────
-    const outputDir = join(afPath, 'output', task.ticket);
+    const outputDir = join(afPath, 'output', task.ticket, slug);
     mkdirSync(outputDir, { recursive: true });
 
     const spawnConfig = {
