@@ -1,10 +1,8 @@
-import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, unlinkSync } from 'fs';
-import { join, dirname } from 'path';
-import matter from 'gray-matter';
-import chalk from 'chalk';
-import { resolveProject, listTasks, findTask, type TaskMeta } from '../lib/workspace.js';
-import { STATUSES, TYPES, PRIORITIES, COMPLEXITIES, type TaskStatus } from '../lib/constants.js';
+import { readFileSync } from 'fs';
+import { resolveProject } from '../lib/workspace.js';
+import { type TaskStatus } from '../lib/constants.js';
 import { formatTaskLine, success, error, dim, heading } from '../lib/format.js';
+import { createProvider } from '../lib/provider-factory.js';
 
 interface TaskListOptions {
   status?: TaskStatus;
@@ -44,10 +42,12 @@ function resolveOrExit(prefix?: string) {
   return resolved;
 }
 
-export function taskListCommand(options: TaskListOptions): void {
+export async function taskListCommand(options: TaskListOptions): Promise<void> {
   const { afPath, meta } = resolveOrExit(options.project);
-  const tasks = listTasks(afPath, {
-    status: options.status as TaskStatus | undefined,
+  const provider = createProvider(afPath, meta);
+
+  const tasks = await provider.list({
+    status: options.status,
     assignee: options.assignee,
     priority: options.priority,
   });
@@ -60,83 +60,41 @@ export function taskListCommand(options: TaskListOptions): void {
   console.log(heading(`${meta.prefix} — Tasks`));
   console.log('');
   for (const task of tasks) {
-    console.log(`  ${formatTaskLine(task.meta)}`);
+    console.log(`  ${formatTaskLine(task)}`);
   }
   console.log('');
   console.log(dim(`  ${tasks.length} task${tasks.length === 1 ? '' : 's'}`));
 }
 
-export function taskCreateCommand(title: string, options: TaskCreateOptions): void {
+export async function taskCreateCommand(title: string, options: TaskCreateOptions): Promise<void> {
   const { afPath, meta } = resolveOrExit(options.project);
+  const provider = createProvider(afPath, meta);
 
-  // Read current counter from project.md
-  const projectFile = join(afPath, 'project.md');
-  const projectRaw = readFileSync(projectFile, 'utf-8');
-  const projectParsed = matter(projectRaw);
-  const counter = projectParsed.data.counter || 1;
+  try {
+    const task = await provider.create({
+      title,
+      type: options.type,
+      priority: options.priority,
+      complexity: options.complexity,
+      assignee: options.assignee,
+      depends: options.depends?.split(',').map(s => s.trim()),
+      due: options.due,
+    });
 
-  const ticket = `${meta.prefix}-${counter}`;
-  const today = new Date().toISOString().split('T')[0];
-
-  // Validate options
-  const type = options.type || 'task';
-  if (!TYPES.includes(type as any)) {
-    console.log(error(`Invalid type: ${type}. Valid: ${TYPES.join(', ')}`));
+    console.log(success(`Created ${task.ticket}: ${task.title}`));
+    console.log(dim(`  Type: ${task.type}  Priority: ${task.priority}  Complexity: ${task.complexity}`));
+    console.log(dim(`  File: ${task.filePath}`));
+  } catch (err: any) {
+    console.log(error(err.message));
     process.exit(1);
   }
-
-  const priority = options.priority || 'medium';
-  if (!PRIORITIES.includes(priority as any)) {
-    console.log(error(`Invalid priority: ${priority}. Valid: ${PRIORITIES.join(', ')}`));
-    process.exit(1);
-  }
-
-  const complexity = options.complexity || 'medium';
-  if (!COMPLEXITIES.includes(complexity as any)) {
-    console.log(error(`Invalid complexity: ${complexity}. Valid: ${COMPLEXITIES.join(', ')}`));
-    process.exit(1);
-  }
-
-  // Build frontmatter
-  const taskMeta: Record<string, unknown> = {
-    ticket,
-    title,
-    type,
-    status: 'backlog',
-    priority,
-    complexity,
-    created: today,
-    updated: today,
-  };
-
-  if (options.assignee) taskMeta.assignee = options.assignee;
-  if (options.depends) taskMeta.depends = options.depends.split(',').map(s => s.trim());
-  if (options.due) taskMeta.due = options.due;
-
-  const taskContent = matter.stringify(
-    `\n# ${title}\n\n## Objective\n\n## Context\n\n## Acceptance\n- [ ] \n\n## Log\n`,
-    taskMeta
-  );
-
-  // Write task file
-  const taskDir = join(afPath, 'tasks', 'backlog');
-  mkdirSync(taskDir, { recursive: true });
-  const taskFile = join(taskDir, `${ticket}.md`);
-  writeFileSync(taskFile, taskContent);
-
-  // Increment counter
-  projectParsed.data.counter = counter + 1;
-  const updatedProject = matter.stringify(projectParsed.content, projectParsed.data);
-  writeFileSync(projectFile, updatedProject);
-
-  console.log(success(`Created ${ticket}: ${title}`));
-  console.log(dim(`  Type: ${type}  Priority: ${priority}  Complexity: ${complexity}`));
-  console.log(dim(`  File: ${taskFile}`));
 }
 
-export function taskShowCommand(ticket: string, options: TaskShowOptions): void {
-  const { afPath } = resolveOrExit(options.project);
-  const task = findTask(afPath, ticket.toUpperCase());
+export async function taskShowCommand(ticket: string, options: TaskShowOptions): Promise<void> {
+  const { afPath, meta } = resolveOrExit(options.project);
+  const provider = createProvider(afPath, meta);
+
+  const task = await provider.get(ticket.toUpperCase());
 
   if (!task) {
     console.log(error(`Task ${ticket} not found.`));
@@ -144,76 +102,45 @@ export function taskShowCommand(ticket: string, options: TaskShowOptions): void 
   }
 
   // Print raw file content (readable markdown)
-  const raw = readFileSync(task.filePath, 'utf-8');
+  const raw = readFileSync(task.filePath!, 'utf-8');
   console.log(raw);
 }
 
-export function taskMoveCommand(ticket: string, targetStatus: string, options: TaskMoveOptions): void {
-  const { afPath } = resolveOrExit(options.project);
+export async function taskMoveCommand(ticket: string, targetStatus: string, options: TaskMoveOptions): Promise<void> {
+  const { afPath, meta } = resolveOrExit(options.project);
+  const provider = createProvider(afPath, meta);
 
-  // Validate status
-  if (!STATUSES.includes(targetStatus as TaskStatus)) {
-    console.log(error(`Invalid status: ${targetStatus}`));
-    console.log(dim(`Valid: ${STATUSES.join(', ')}`));
-    process.exit(1);
-  }
-
-  const task = findTask(afPath, ticket.toUpperCase());
-  if (!task) {
-    console.log(error(`Task ${ticket} not found.`));
-    process.exit(1);
-  }
-
-  // If moving to released/closed, check acceptance criteria
-  if (['released', 'closed'].includes(targetStatus)) {
-    const unchecked = (task.content.match(/- \[ \]/g) || []).length;
-    if (unchecked > 0) {
-      console.log(error(`Cannot move to ${targetStatus}: ${unchecked} unchecked acceptance criteria.`));
+  try {
+    const existing = await provider.get(ticket.toUpperCase());
+    if (!existing) {
+      console.log(error(`Task ${ticket} not found.`));
       process.exit(1);
     }
-  }
 
-  const oldStatus = task.meta.status;
-  if (oldStatus === targetStatus) {
-    console.log(dim(`Task ${ticket} is already in ${targetStatus}.`));
-    return;
-  }
+    const oldStatus = existing.status;
 
-  // Update frontmatter
-  const raw = readFileSync(task.filePath, 'utf-8');
-  const parsed = matter(raw);
-  parsed.data.status = targetStatus;
-  parsed.data.updated = new Date().toISOString().split('T')[0];
-  const updated = matter.stringify(parsed.content, parsed.data);
+    if (oldStatus === targetStatus) {
+      console.log(dim(`Task ${ticket} is already in ${targetStatus}.`));
+      return;
+    }
 
-  // Move file
-  const targetDir = join(afPath, 'tasks', targetStatus);
-  mkdirSync(targetDir, { recursive: true });
-  const targetFile = join(targetDir, `${ticket.toUpperCase()}.md`);
-  writeFileSync(targetFile, updated);
-
-  // Remove old file
-  unlinkSync(task.filePath);
-
-  console.log(success(`${ticket}: ${oldStatus} → ${targetStatus}`));
-}
-
-export function taskAssignCommand(ticket: string, assignee: string, options: TaskAssignOptions): void {
-  const { afPath } = resolveOrExit(options.project);
-  const task = findTask(afPath, ticket.toUpperCase());
-
-  if (!task) {
-    console.log(error(`Task ${ticket} not found.`));
+    const task = await provider.move(ticket.toUpperCase(), targetStatus);
+    console.log(success(`${task.ticket}: ${oldStatus} → ${targetStatus}`));
+  } catch (err: any) {
+    console.log(error(err.message));
     process.exit(1);
   }
+}
 
-  // Update frontmatter
-  const raw = readFileSync(task.filePath, 'utf-8');
-  const parsed = matter(raw);
-  parsed.data.assignee = assignee;
-  parsed.data.updated = new Date().toISOString().split('T')[0];
-  const updated = matter.stringify(parsed.content, parsed.data);
-  writeFileSync(task.filePath, updated);
+export async function taskAssignCommand(ticket: string, assignee: string, options: TaskAssignOptions): Promise<void> {
+  const { afPath, meta } = resolveOrExit(options.project);
+  const provider = createProvider(afPath, meta);
 
-  console.log(success(`${ticket} assigned to ${assignee}`));
+  try {
+    const task = await provider.assign(ticket.toUpperCase(), assignee);
+    console.log(success(`${task.ticket} assigned to ${assignee}`));
+  } catch (err: any) {
+    console.log(error(err.message));
+    process.exit(1);
+  }
 }

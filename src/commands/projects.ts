@@ -1,9 +1,9 @@
 import chalk from 'chalk';
 import { listProjects } from '../lib/workspace.js';
-import { listTasks } from '../lib/workspace.js';
+import { FileProvider } from '../lib/providers/file-provider.js';
 import { heading, dim } from '../lib/format.js';
 
-export function projectsCommand(): void {
+export async function projectsCommand(): Promise<void> {
   const projects = listProjects();
 
   if (projects.length === 0) {
@@ -15,11 +15,12 @@ export function projectsCommand(): void {
   console.log('');
 
   for (const project of projects) {
-    const tasks = listTasks(project.afPath);
-    const inProgress = tasks.filter(t => t.meta.status === 'in-progress').length;
-    const open = tasks.filter(t => t.meta.status === 'open').length;
-    const backlog = tasks.filter(t => t.meta.status === 'backlog').length;
-    const blocked = tasks.filter(t => t.meta.status === 'blocked').length;
+    const provider = new FileProvider(project.afPath, project.meta);
+    const tasks = await provider.list();
+    const inProgress = tasks.filter(t => t.status === 'in-progress').length;
+    const open = tasks.filter(t => t.status === 'open').length;
+    const backlog = tasks.filter(t => t.status === 'backlog').length;
+    const blocked = tasks.filter(t => t.status === 'blocked').length;
 
     const statusBadge = project.meta.status === 'active'
       ? chalk.green('● active')

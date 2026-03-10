@@ -1,5 +1,14 @@
 import chalk from 'chalk';
-import type { TaskMeta } from './workspace.js';
+
+// Minimal shape required by formatTaskLine — satisfied by both TaskMeta and Task.
+interface TaskLike {
+  ticket: string;
+  title: string;
+  type: string;
+  status: string;
+  priority: string;
+  assignee?: string;
+}
 
 export function priorityColor(priority: string): string {
   switch (priority) {
@@ -39,7 +48,7 @@ export function typeIcon(type: string): string {
   }
 }
 
-export function formatTaskLine(meta: TaskMeta): string {
+export function formatTaskLine(meta: TaskLike): string {
   const ticket = chalk.bold(meta.ticket);
   const title = meta.title;
   const status = statusColor(meta.status);

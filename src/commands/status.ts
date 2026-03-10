@@ -1,5 +1,6 @@
 import chalk from 'chalk';
-import { resolveProject, listTasks } from '../lib/workspace.js';
+import { resolveProject } from '../lib/workspace.js';
+import { createProvider } from '../lib/provider-factory.js';
 import { STATUSES } from '../lib/constants.js';
 import { heading, statusColor, formatTaskLine, error, dim } from '../lib/format.js';
 
@@ -7,7 +8,7 @@ interface StatusOptions {
   project?: string;
 }
 
-export function statusCommand(options: StatusOptions): void {
+export async function statusCommand(options: StatusOptions): Promise<void> {
   const resolved = resolveProject(options.project);
 
   if (!resolved) {
@@ -16,7 +17,8 @@ export function statusCommand(options: StatusOptions): void {
   }
 
   const { afPath, meta } = resolved;
-  const tasks = listTasks(afPath);
+  const provider = createProvider(afPath, meta);
+  const tasks = await provider.list();
 
   console.log(heading(`${meta.prefix} — ${meta.name}`));
   console.log('');
@@ -27,9 +29,9 @@ export function statusCommand(options: StatusOptions): void {
     byStatus.set(status, []);
   }
   for (const task of tasks) {
-    const group = byStatus.get(task.meta.status) || [];
+    const group = byStatus.get(task.status) || [];
     group.push(task);
-    byStatus.set(task.meta.status, group);
+    byStatus.set(task.status, group);
   }
 
   // Print non-empty statuses
@@ -41,7 +43,7 @@ export function statusCommand(options: StatusOptions): void {
 
     console.log(`  ${statusColor(status)} ${chalk.dim(`(${group.length})`)}`);
     for (const task of group) {
-      console.log(`    ${formatTaskLine(task.meta)}`);
+      console.log(`    ${formatTaskLine(task)}`);
     }
     console.log('');
   }
@@ -52,6 +54,6 @@ export function statusCommand(options: StatusOptions): void {
 
   // Summary line
   const total = tasks.length;
-  const done = tasks.filter(t => ['released', 'closed'].includes(t.meta.status)).length;
+  const done = tasks.filter(t => ['released', 'closed'].includes(t.status)).length;
   console.log(dim(`  ${total} tasks total, ${done} completed`));
 }
