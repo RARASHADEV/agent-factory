@@ -71,3 +71,38 @@ An **Advisory Response** containing:
 - Do not implement solutions — only advise
 - Do not guess when you don't know — acknowledge uncertainty
 - Do not provide advice outside your knowledge — recommend external consultation if needed
+
+
+### Logging
+
+Append a structured entry to the `## Log` section of the task file for each significant action. Use this exact format:
+
+```
+- [ISO_TIMESTAMP] agent-slug: event | detail
+```
+
+**Timestamps:** ISO 8601 format (e.g., `2026-03-10T14:32:00.000Z`). Use current UTC time.
+
+**Event types** (from the AF-8 audit system — use these exact strings):
+- `spawn.start` — beginning work on the task
+- `spawn.complete` — finished successfully
+- `spawn.fail` — cannot complete the task
+- `task.move` — changing the task status
+- `task.assign` — changing the task assignee or role
+- `agent.sync` — syncing or updating agent definitions
+
+**Log these events:**
+- **Step started:** `spawn.start` when beginning each major step
+- **Step completed:** `spawn.complete` with a summary when the step finishes
+- **Decisions made:** include the decision and brief reasoning in the detail
+- **Files changed:** include each file path created, modified, or deleted
+
+**Example entries:**
+```
+- [2026-03-10T14:32:00.000Z] trusted-advisor: spawn.start | Starting consultation on database architecture question
+- [2026-03-10T14:33:00.000Z] trusted-advisor: task.move | open → in-progress
+- [2026-03-10T14:34:00.000Z] trusted-advisor: spawn.start | Decision: recommended JSONL over SQLite for audit log — simpler, no schema migration
+- [2026-03-10T14:35:00.000Z] trusted-advisor: spawn.complete | Advisory response delivered, status set to Advise Ready
+```
+
+Entries must be machine-parseable: ISO 8601 timestamp, your agent slug, a valid AuditEvent type, and a plain-text detail field separated by ` | `.

@@ -72,3 +72,38 @@ Documentation deliverables which may include:
 - Do not copy-paste code comments as documentation without context
 - Keep documentation DRY — link rather than duplicate
 - Flag if implementation is unclear and needs developer input
+
+
+### Logging
+
+Append a structured entry to the `## Log` section of the task file for each significant action. Use this exact format:
+
+```
+- [ISO_TIMESTAMP] agent-slug: event | detail
+```
+
+**Timestamps:** ISO 8601 format (e.g., `2026-03-10T14:32:00.000Z`). Use current UTC time.
+
+**Event types** (from the AF-8 audit system — use these exact strings):
+- `spawn.start` — beginning work on the task
+- `spawn.complete` — finished successfully
+- `spawn.fail` — cannot complete the task
+- `task.move` — changing the task status
+- `task.assign` — changing the task assignee or role
+- `agent.sync` — syncing or updating agent definitions
+
+**Log these events:**
+- **Step started:** `spawn.start` when beginning each major step
+- **Step completed:** `spawn.complete` with a summary when the step finishes
+- **Decisions made:** include the decision and brief reasoning in the detail
+- **Files changed:** include each file path created, modified, or deleted
+
+**Example entries:**
+```
+- [2026-03-10T14:32:00.000Z] documentalist: spawn.start | Starting documentation for AF-9 audit logging feature
+- [2026-03-10T14:33:00.000Z] documentalist: task.move | open → in-progress
+- [2026-03-10T14:34:00.000Z] documentalist: spawn.start | Modified: README.md — added audit logging usage section
+- [2026-03-10T14:35:00.000Z] documentalist: spawn.complete | Documentation complete, all sections updated
+```
+
+Entries must be machine-parseable: ISO 8601 timestamp, your agent slug, a valid AuditEvent type, and a plain-text detail field separated by ` | `.

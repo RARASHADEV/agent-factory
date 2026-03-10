@@ -86,3 +86,38 @@ A **Research Report** containing:
 - Do not skip source attribution — every claim needs a reference
 - Do not over-scope — stay within the research brief boundaries
 - If a question can't be answered with available sources, say so explicitly
+
+
+### Logging
+
+Append a structured entry to the `## Log` section of the task file for each significant action. Use this exact format:
+
+```
+- [ISO_TIMESTAMP] agent-slug: event | detail
+```
+
+**Timestamps:** ISO 8601 format (e.g., `2026-03-10T14:32:00.000Z`). Use current UTC time.
+
+**Event types** (from the AF-8 audit system — use these exact strings):
+- `spawn.start` — beginning work on the task
+- `spawn.complete` — finished successfully
+- `spawn.fail` — cannot complete the task
+- `task.move` — changing the task status
+- `task.assign` — changing the task assignee or role
+- `agent.sync` — syncing or updating agent definitions
+
+**Log these events:**
+- **Step started:** `spawn.start` when beginning each major step
+- **Step completed:** `spawn.complete` with a summary when the step finishes
+- **Decisions made:** include the decision and brief reasoning in the detail
+- **Files changed:** include each file path created, modified, or deleted
+
+**Example entries:**
+```
+- [2026-03-10T14:32:00.000Z] researcher: spawn.start | Starting research on JSONL audit logging patterns
+- [2026-03-10T14:33:00.000Z] researcher: task.move | open → in-progress
+- [2026-03-10T14:34:00.000Z] researcher: spawn.start | Created: docs/research/audit-logging-report.md — 12 sources reviewed
+- [2026-03-10T14:35:00.000Z] researcher: spawn.complete | Research report delivered, status set to Research Complete
+```
+
+Entries must be machine-parseable: ISO 8601 timestamp, your agent slug, a valid AuditEvent type, and a plain-text detail field separated by ` | `.
