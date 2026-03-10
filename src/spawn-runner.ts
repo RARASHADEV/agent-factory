@@ -16,6 +16,7 @@
 import { writeFileSync, mkdirSync, appendFileSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { runAgent } from './lib/sdk.js';
+import { auditLog } from './lib/audit.js';
 
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
 
@@ -30,6 +31,7 @@ interface SpawnConfig {
   ticket: string;
   agentSlug: string;
   timeoutMs?: number;
+  afPath?: string;   // Optional: workspace .af/ path for audit logging
 }
 
 // --- Crash safety ---
@@ -125,6 +127,19 @@ async function main() {
     status.success = result.success;
     writeFileSync(statusFile, JSON.stringify(status, null, 2));
 
+    // Audit: spawn.complete
+    const resolvedAfPath = config.afPath || join(config.outputDir, '..', '..');
+    try {
+      auditLog(resolvedAfPath, {
+        event: 'spawn.complete',
+        ticket: config.ticket,
+        agent: config.agentSlug,
+        actor: config.agentSlug,
+        detail: `Completed in ${Math.round(result.durationMs / 1000)}s`,
+        meta: { success: result.success, durationMs: result.durationMs },
+      });
+    } catch {}
+
     console.log(`✅ Agent ${config.agentSlug} completed ${config.ticket} (${result.numTurns} turns, ${Math.round(result.durationMs / 1000)}s)`);
   } catch (err: any) {
     clearTimeout(timer);
@@ -138,6 +153,19 @@ async function main() {
 
     // Also write to crash.log for forensics
     appendFileSync(crashLog, `[${new Date().toISOString()}] caught error\n${stack}\n\n`);
+
+    // Audit: spawn.fail
+    const resolvedAfPathFail = config.afPath || join(config.outputDir, '..', '..');
+    try {
+      auditLog(resolvedAfPathFail, {
+        event: 'spawn.fail',
+        ticket: config.ticket,
+        agent: config.agentSlug,
+        actor: config.agentSlug,
+        detail: `Failed: ${err.message}`,
+        meta: { error: stack },
+      });
+    } catch {}
 
     console.error(`❌ Agent ${config.agentSlug} failed on ${config.ticket}: ${err.message}`);
     process.exit(1);

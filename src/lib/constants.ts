@@ -30,3 +30,8 @@ export const COMPLEXITIES = ['low', 'medium', 'high'] as const;
 export type Complexity = (typeof COMPLEXITIES)[number];
 
 export const PROJECT_STATUSES = ['inception', 'active', 'paused', 'archived'] as const;
+
+// --- Feature Flags ---
+
+/** AF-8: Audit logging. When false, auditLog() is a no-op. */
+export const ENABLE_AF_8 = false;

@@ -5,6 +5,7 @@ import matter from 'gray-matter';
 import { AF_DIR, STATUSES } from '../lib/constants.js';
 import { addProject, ensureGlobalConfig } from '../lib/config.js';
 import { success, error, dim } from '../lib/format.js';
+import { auditLog } from '../lib/audit.js';
 
 interface InitOptions {
   name?: string;
@@ -97,6 +98,19 @@ export function initCommand(prefix: string, options: InitOptions): void {
   ensureGlobalConfig();
   const path = projectDir.replace(process.env.HOME || '', '~');
   addProject(normalizedPrefix, path);
+
+  // Add audit.log to .gitignore inside .af/
+  const gitignorePath = join(afPath, '.gitignore');
+  writeFileSync(gitignorePath, 'audit.log\n', 'utf-8');
+
+  try {
+    auditLog(afPath, {
+      event: 'project.init',
+      actor: 'cli',
+      detail: `Initialized project ${projectName} (${normalizedPrefix})`,
+      meta: { prefix: normalizedPrefix },
+    });
+  } catch {}
 
   console.log(success(`Workspace initialized: ${afPath}`));
   console.log(dim(`  Project: ${projectName} (${normalizedPrefix})`));

@@ -5,6 +5,7 @@ import chalk from 'chalk';
 import { resolveProject, listTasks, findTask, type TaskMeta } from '../lib/workspace.js';
 import { STATUSES, TYPES, PRIORITIES, COMPLEXITIES, type TaskStatus } from '../lib/constants.js';
 import { formatTaskLine, success, error, dim, heading } from '../lib/format.js';
+import { auditLog } from '../lib/audit.js';
 
 interface TaskListOptions {
   status?: TaskStatus;
@@ -129,6 +130,16 @@ export function taskCreateCommand(title: string, options: TaskCreateOptions): vo
   const updatedProject = matter.stringify(projectParsed.content, projectParsed.data);
   writeFileSync(projectFile, updatedProject);
 
+  try {
+    auditLog(afPath, {
+      event: 'task.create',
+      ticket,
+      actor: 'cli',
+      detail: `Created task: ${title}`,
+      meta: { type, priority, ...(options.assignee ? { assignee: options.assignee } : {}) },
+    });
+  } catch {}
+
   console.log(success(`Created ${ticket}: ${title}`));
   console.log(dim(`  Type: ${type}  Priority: ${priority}  Complexity: ${complexity}`));
   console.log(dim(`  File: ${taskFile}`));
@@ -195,6 +206,16 @@ export function taskMoveCommand(ticket: string, targetStatus: string, options: T
   // Remove old file
   unlinkSync(task.filePath);
 
+  try {
+    auditLog(afPath, {
+      event: 'task.move',
+      ticket: ticket.toUpperCase(),
+      actor: 'cli',
+      detail: `${oldStatus} → ${targetStatus}`,
+      meta: { from: oldStatus, to: targetStatus },
+    });
+  } catch {}
+
   console.log(success(`${ticket}: ${oldStatus} → ${targetStatus}`));
 }
 
@@ -214,6 +235,17 @@ export function taskAssignCommand(ticket: string, assignee: string, options: Tas
   parsed.data.updated = new Date().toISOString().split('T')[0];
   const updated = matter.stringify(parsed.content, parsed.data);
   writeFileSync(task.filePath, updated);
+
+  try {
+    const previousAssignee = task.meta.assignee;
+    auditLog(afPath, {
+      event: 'task.assign',
+      ticket: ticket.toUpperCase(),
+      actor: 'cli',
+      detail: `Assigned to ${assignee}`,
+      meta: { ...(previousAssignee ? { previousAssignee } : {}) },
+    });
+  } catch {}
 
   console.log(success(`${ticket} assigned to ${assignee}`));
 }

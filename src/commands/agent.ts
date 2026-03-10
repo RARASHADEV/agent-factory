@@ -7,6 +7,7 @@ import { AGENTS_DIR } from '../lib/constants.js';
 import { loadConfig } from '../lib/config.js';
 import { resolveProject, findTask } from '../lib/workspace.js';
 import { heading, success, error, dim } from '../lib/format.js';
+import { auditLog } from '../lib/audit.js';
 
 interface AgentMeta {
   slug: string;
@@ -121,6 +122,7 @@ export async function agentSyncCommand(slug?: string): Promise<void> {
 
     let count = 0;
     let skipped = 0;
+    const syncedSlugs: string[] = [];
 
     for (const agent of agents) {
       if (!agent.isActive) {
@@ -173,11 +175,23 @@ export async function agentSyncCommand(slug?: string): Promise<void> {
 
       writeFileSync(join(AGENTS_DIR, `${agentSlug}.md`), content);
       count++;
+      syncedSlugs.push(agentSlug);
       console.log(success(`${agentSlug}`) + dim(` (v${detail.version}${model ? ` · ${model}` : ''})`));
     }
 
     console.log('');
     console.log(success(`${count} agent${count === 1 ? '' : 's'} synced`) + (skipped > 0 ? dim(` (${skipped} skipped)`) : ''));
+
+    // Audit log — best-effort; use cwd .af as fallback (global op, no project required)
+    try {
+      const afPath = join(process.cwd(), '.af');
+      auditLog(afPath, {
+        event: 'agent.sync',
+        actor: 'cli',
+        detail: `Synced ${count} agent${count === 1 ? '' : 's'}`,
+        meta: { agents: syncedSlugs },
+      });
+    } catch {}
   } catch (err: any) {
     if (err.code === 'ECONNREFUSED') {
       console.log(error(`Cannot reach agent-platform at ${upstream.url}`));
@@ -265,6 +279,7 @@ export async function agentSpawnCommand(slug: string, options: SpawnOptions): Pr
       outputDir,
       ticket,
       agentSlug: slug,
+      afPath: join(cwd, '.af'),
     };
 
     const configFile = join(outputDir, 'config.json');
@@ -292,6 +307,19 @@ export async function agentSpawnCommand(slug: string, options: SpawnOptions): Pr
       ticket,
       startedAt: new Date().toISOString(),
     }, null, 2));
+
+    // Audit: spawn.start (prompt mode, background)
+    try {
+      const afPath = join(cwd, '.af');
+      auditLog(afPath, {
+        event: 'spawn.start',
+        ticket,
+        agent: slug,
+        actor: 'cli',
+        detail: `Spawned ${slug} on ${ticket} (background)`,
+        meta: { mode: 'background', pid: child.pid },
+      });
+    } catch {}
 
     // Output JSON for programmatic consumption
     const result = {
@@ -394,6 +422,7 @@ export async function agentSpawnCommand(slug: string, options: SpawnOptions): Pr
       outputDir,
       ticket: task.meta.ticket,
       agentSlug: slug,
+      afPath,
     };
 
     // Write config to temp file
@@ -425,6 +454,18 @@ export async function agentSpawnCommand(slug: string, options: SpawnOptions): Pr
       startedAt: new Date().toISOString(),
     }, null, 2));
 
+    // Audit: spawn.start (task mode, background)
+    try {
+      auditLog(afPath, {
+        event: 'spawn.start',
+        ticket: task.meta.ticket,
+        agent: slug,
+        actor: 'cli',
+        detail: `Spawned ${slug} on ${task.meta.ticket} (background)`,
+        meta: { mode: 'background', pid: child.pid },
+      });
+    } catch {}
+
     console.log(success(`Agent ${slug} spawned in background`));
     console.log(dim(`  PID: ${child.pid}`));
     console.log(dim(`  Output: ${outputDir}/`));
@@ -450,6 +491,20 @@ export async function agentSpawnCommand(slug: string, options: SpawnOptions): Pr
     args.push('--allowedTools', agent.meta.tools.join(','));
   }
 
+  // Audit: spawn.start (foreground)
+  try {
+    auditLog(afPath, {
+      event: 'spawn.start',
+      ticket: task.meta.ticket,
+      agent: slug,
+      actor: 'cli',
+      detail: `Spawned ${slug} on ${task.meta.ticket} (foreground)`,
+      meta: { mode: 'foreground' },
+    });
+  } catch {}
+
+  const spawnStart = Date.now();
+
   const child = spawn(cliPath, args, {
     cwd: projectDir,
     stdio: 'inherit',
@@ -458,6 +513,9 @@ export async function agentSpawnCommand(slug: string, options: SpawnOptions): Pr
 
   child.on('close', (code) => {
     console.log('');
+    const durationMs = Date.now() - spawnStart;
+    const durationS = Math.round(durationMs / 1000);
+
     if (code === 0) {
       console.log(success(`Agent ${slug} completed task ${task.meta.ticket}`));
       // Append log entry
@@ -465,8 +523,32 @@ export async function agentSpawnCommand(slug: string, options: SpawnOptions): Pr
       const timestamp = new Date().toISOString();
       const logEntry = `- [${timestamp}] ${slug}: completed | Agent session finished.\n`;
       writeFileSync(task.filePath, raw + logEntry);
+
+      // Audit: spawn.complete
+      try {
+        auditLog(afPath, {
+          event: 'spawn.complete',
+          ticket: task.meta.ticket,
+          agent: slug,
+          actor: slug,
+          detail: `Completed in ${durationS}s`,
+          meta: { success: true, durationMs },
+        });
+      } catch {}
     } else {
       console.log(error(`Agent ${slug} exited with code ${code}`));
+
+      // Audit: spawn.fail
+      try {
+        auditLog(afPath, {
+          event: 'spawn.fail',
+          ticket: task.meta.ticket,
+          agent: slug,
+          actor: slug,
+          detail: `Failed: exited with code ${code}`,
+          meta: { error: `exit code ${code}` },
+        });
+      } catch {}
     }
   });
 }
@@ -544,5 +626,17 @@ export function agentStatusCommand(ticket?: string, options?: { project?: string
       console.log(dim(`     Result: ${preview}${preview.length >= 200 ? '...' : ''}`));
     }
     console.log('');
+
+    // Audit: spawn.status_check
+    try {
+      auditLog(afPath, {
+        event: 'spawn.status_check',
+        ticket: status.ticket || dir,
+        agent: status.agent,
+        actor: 'cli',
+        detail: `Checked status of ${status.ticket || dir}`,
+        meta: { status: status.status },
+      });
+    } catch {}
   }
 }
