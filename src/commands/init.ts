@@ -2,16 +2,17 @@ import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { join, resolve, basename } from 'path';
 import { stringify as stringifyYaml } from 'yaml';
 import matter from 'gray-matter';
-import { AF_DIR, STATUSES } from '../lib/constants.js';
-import { addProject, ensureGlobalConfig } from '../lib/config.js';
+import { AF_DIR, STATUSES, ENABLE_AF_12 } from '../lib/constants.js';
+import { addProject, ensureGlobalConfig, loadConfig } from '../lib/config.js';
 import { success, error, dim } from '../lib/format.js';
 import { auditLog } from '../lib/audit.js';
+import { LokaHttpClient } from '../lib/providers/loka-http-client.js';
 
 interface InitOptions {
   name?: string;
 }
 
-export function initCommand(prefix: string, options: InitOptions): void {
+export async function initCommand(prefix: string, options: InitOptions): Promise<void> {
   const projectDir = process.cwd();
   const afPath = join(projectDir, AF_DIR);
 
@@ -111,6 +112,27 @@ export function initCommand(prefix: string, options: InitOptions): void {
       meta: { prefix: normalizedPrefix },
     });
   } catch {}
+
+  // AF-12: Create project in Loka if configured (best-effort, never fails init)
+  if (ENABLE_AF_12) {
+    const config = loadConfig();
+    if (config.loka?.url && config.loka?.apiKey) {
+      try {
+        const client = new LokaHttpClient({
+          baseUrl: config.loka.url,
+          apiKey: config.loka.apiKey,
+        });
+        await client.post('/projects', {
+          name: projectName,
+          prefix: normalizedPrefix,
+          description: '',
+        });
+        console.log(dim('  Created project in Loka'));
+      } catch (err: any) {
+        console.log(dim(`  Warning: Could not create Loka project: ${err?.message ?? String(err)}`));
+      }
+    }
+  }
 
   console.log(success(`Workspace initialized: ${afPath}`));
   console.log(dim(`  Project: ${projectName} (${normalizedPrefix})`));

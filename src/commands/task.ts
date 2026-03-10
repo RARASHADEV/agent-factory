@@ -4,6 +4,7 @@ import { type TaskStatus } from '../lib/constants.js';
 import { formatTaskLine, success, error, dim, heading } from '../lib/format.js';
 import { auditLog } from '../lib/audit.js';
 import { createProvider } from '../lib/provider-factory.js';
+import { postActivityToLoka } from '../lib/audit-bridge.js';
 
 interface TaskListOptions {
   status?: TaskStatus;
@@ -146,6 +147,7 @@ export async function taskMoveCommand(ticket: string, targetStatus: string, opti
         meta: { from: oldStatus, to: targetStatus },
       });
     } catch {}
+    void postActivityToLoka(afPath, task.ticket, `📋 Task moved: ${oldStatus} → ${targetStatus}`);
 
     console.log(success(`${task.ticket}: ${oldStatus} → ${targetStatus}`));
   } catch (err: any) {
@@ -171,6 +173,7 @@ export async function taskAssignCommand(ticket: string, assignee: string, option
         meta: { ...(existing?.assignee ? { previousAssignee: existing.assignee } : {}) },
       });
     } catch {}
+    void postActivityToLoka(afPath, task.ticket, `👤 Task assigned to ${assignee}`);
 
     console.log(success(`${task.ticket} assigned to ${assignee}`));
   } catch (err: any) {

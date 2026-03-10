@@ -18,6 +18,7 @@ import {
   agentSpawnCommand,
   agentStatusCommand,
 } from './commands/agent.js';
+import { syncCommand } from './commands/sync.js';
 
 const program = new Command();
 
@@ -128,5 +129,18 @@ agent
   .description('Check status of background agent spawns')
   .option('-p, --project <prefix>', 'Project prefix')
   .action(agentStatusCommand);
+
+// --- Sync command (AF-12) ---
+
+program
+  .command('sync')
+  .description('Synchronize tasks with Loka')
+  .option('-m, --mode <mode>', 'Sync mode: push, pull, bidirectional', 'push')
+  .option('--pull', 'Shorthand for --mode pull')
+  .option('--bidirectional', 'Shorthand for --mode bidirectional')
+  .option('--dry-run', 'Show what would be synced without making changes')
+  .option('-v, --verbose', 'Show per-task sync details')
+  .option('-p, --project <prefix>', 'Project prefix')
+  .action(syncCommand);
 
 program.parse();

@@ -35,3 +35,6 @@ export const PROJECT_STATUSES = ['inception', 'active', 'paused', 'archived'] as
 
 /** AF-8: Audit logging. When false, auditLog() is a no-op. */
 export const ENABLE_AF_8 = false;
+
+/** AF-12: Bidirectional Loka sync. When false, sync command and Loka activity posting are disabled. */
+export const ENABLE_AF_12 = false;

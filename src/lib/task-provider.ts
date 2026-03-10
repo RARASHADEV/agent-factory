@@ -30,6 +30,7 @@ export interface TaskUpdateInput {
   complexity?: string;
   due?: string | null;
   design?: string;
+  lokaRef?: string;          // Set the loka-ref link to Loka UUID
 }
 
 export interface Task {
@@ -48,6 +49,7 @@ export interface Task {
   design?: string;        // path to design doc
   filePath?: string;      // only set by FileProvider
   externalId?: string;    // only set by LokaProvider (Loka UUID)
+  lokaRef?: string;       // Loka UUID, stored as "loka-ref" in frontmatter
 }
 
 export interface TaskProvider {
@@ -93,5 +95,12 @@ export class ProviderError extends Error {
   constructor(message: string, public statusCode?: number) {
     super(message);
     this.name = 'ProviderError';
+  }
+}
+
+export class LokaUnreachableError extends ProviderError {
+  constructor(message = 'Loka API is unreachable') {
+    super(message);
+    this.name = 'LokaUnreachableError';
   }
 }

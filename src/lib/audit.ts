@@ -13,7 +13,9 @@ export type AuditEvent =
   | 'spawn.complete'
   | 'spawn.fail'
   | 'spawn.status_check'
-  | 'agent.sync';
+  | 'agent.sync'
+  | 'sync.complete'
+  | 'sync.error';
 
 export interface AuditEntry {
   timestamp: string;        // ISO 8601

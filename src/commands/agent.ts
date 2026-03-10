@@ -9,6 +9,7 @@ import { resolveProject } from '../lib/workspace.js';
 import { createProvider } from '../lib/provider-factory.js';
 import { heading, success, error, dim } from '../lib/format.js';
 import { auditLog } from '../lib/audit.js';
+import { postActivityToLoka } from '../lib/audit-bridge.js';
 
 interface AgentMeta {
   slug: string;
@@ -467,6 +468,7 @@ export async function agentSpawnCommand(slug: string, options: SpawnOptions): Pr
         meta: { mode: 'background', pid: child.pid },
       });
     } catch {}
+    void postActivityToLoka(afPath, task.ticket, `🤖 Agent ${slug} started working on ${task.ticket}`);
 
     console.log(success(`Agent ${slug} spawned in background`));
     console.log(dim(`  PID: ${child.pid}`));
@@ -504,6 +506,7 @@ export async function agentSpawnCommand(slug: string, options: SpawnOptions): Pr
       meta: { mode: 'foreground' },
     });
   } catch {}
+  void postActivityToLoka(afPath, task.ticket, `🤖 Agent ${slug} started working on ${task.ticket}`);
 
   const spawnStart = Date.now();
 
@@ -534,6 +537,7 @@ export async function agentSpawnCommand(slug: string, options: SpawnOptions): Pr
           meta: { success: true, durationMs },
         });
       } catch {}
+      void postActivityToLoka(afPath, task.ticket, `✅ Agent ${slug} completed work on ${task.ticket} (${durationS}s)`);
     } else {
       console.log(error(`Agent ${slug} exited with code ${code}`));
 
@@ -548,6 +552,7 @@ export async function agentSpawnCommand(slug: string, options: SpawnOptions): Pr
           meta: { error: `exit code ${code}` },
         });
       } catch {}
+      void postActivityToLoka(afPath, task.ticket, `❌ Agent ${slug} failed on ${task.ticket}: exit code ${code}`);
     }
   });
 }

@@ -17,6 +17,7 @@ import { writeFileSync, mkdirSync, appendFileSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { runAgent } from './lib/sdk.js';
 import { auditLog } from './lib/audit.js';
+import { postActivityToLoka } from './lib/audit-bridge.js';
 
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
 
@@ -139,6 +140,11 @@ async function main() {
         meta: { success: result.success, durationMs: result.durationMs },
       });
     } catch {}
+    void postActivityToLoka(
+      resolvedAfPath,
+      config.ticket,
+      `✅ Agent ${config.agentSlug} completed work on ${config.ticket} (${Math.round(result.durationMs / 1000)}s)`,
+    );
 
     console.log(`✅ Agent ${config.agentSlug} completed ${config.ticket} (${result.numTurns} turns, ${Math.round(result.durationMs / 1000)}s)`);
   } catch (err: any) {
@@ -166,6 +172,11 @@ async function main() {
         meta: { error: stack },
       });
     } catch {}
+    void postActivityToLoka(
+      resolvedAfPathFail,
+      config.ticket,
+      `❌ Agent ${config.agentSlug} failed on ${config.ticket}: ${err.message}`,
+    );
 
     console.error(`❌ Agent ${config.agentSlug} failed on ${config.ticket}: ${err.message}`);
     process.exit(1);

@@ -166,6 +166,10 @@ export class FileProvider implements TaskProvider {
       parsed.data.due = input.due;
     }
 
+    if (input.lokaRef !== undefined) {
+      parsed.data['loka-ref'] = input.lokaRef;
+    }
+
     parsed.data.updated = today;
 
     let content = parsed.content;
@@ -278,6 +282,7 @@ export class FileProvider implements TaskProvider {
       description: content.trim(),
       design: data.design as string | undefined,
       filePath,
+      lokaRef: data['loka-ref'] as string | undefined,
     };
   }
 }

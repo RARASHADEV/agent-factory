@@ -13,6 +13,15 @@ export interface LokaConfig {
   apiKey: string;
   /** Optional status name overrides: AF slug → Loka status name */
   statusMap?: Record<string, string>;
+  /** Optional priority name overrides: AF name → Loka priority name */
+  priorityMap?: Record<string, string>;
+  /** Sync settings */
+  sync?: {
+    /** Default sync mode: push, pull, bidirectional. Default: push */
+    defaultMode?: 'push' | 'pull' | 'bidirectional';
+    /** Auto-post agent activity as Loka comments. Default: true */
+    postActivity?: boolean;
+  };
 }
 
 export interface GlobalConfig {
