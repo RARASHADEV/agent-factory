@@ -4,7 +4,8 @@ import { type TaskStatus } from '../lib/constants.js';
 import { formatTaskLine, success, error, dim, heading } from '../lib/format.js';
 import { auditLog } from '../lib/audit.js';
 import { createProvider } from '../lib/provider-factory.js';
-import { postActivityToLoka } from '../lib/audit-bridge.js';
+import { postActionSync } from '../lib/post-action-sync.js';
+import { type TaskCreateInput } from '../lib/task-provider.js';
 
 interface TaskListOptions {
   status?: TaskStatus;
@@ -32,6 +33,10 @@ interface TaskMoveOptions {
 }
 
 interface TaskAssignOptions {
+  project?: string;
+}
+
+interface TaskLogOptions {
   project?: string;
 }
 
@@ -73,7 +78,7 @@ export async function taskCreateCommand(title: string, options: TaskCreateOption
   const provider = createProvider(afPath, meta);
 
   try {
-    const task = await provider.create({
+    const input: TaskCreateInput = {
       title,
       type: options.type,
       priority: options.priority,
@@ -81,7 +86,8 @@ export async function taskCreateCommand(title: string, options: TaskCreateOption
       assignee: options.assignee,
       depends: options.depends?.split(',').map(s => s.trim()),
       due: options.due,
-    });
+    };
+    const task = await provider.create(input);
 
     console.log(success(`Created ${task.ticket}: ${task.title}`));
     console.log(dim(`  Type: ${task.type}  Priority: ${task.priority}  Complexity: ${task.complexity}`));
@@ -96,6 +102,9 @@ export async function taskCreateCommand(title: string, options: TaskCreateOption
         meta: { type: task.type, priority: task.priority, ...(options.assignee ? { assignee: options.assignee } : {}) },
       });
     } catch {}
+
+    // Unified post-action sync to Loka (fire-and-forget — local file is source of truth)
+    void postActionSync(afPath, meta, task.ticket, 'create', { createInput: { ...input, ticket: task.ticket } });
   } catch (err: any) {
     console.log(error(err.message));
     process.exit(1);
@@ -147,7 +156,9 @@ export async function taskMoveCommand(ticket: string, targetStatus: string, opti
         meta: { from: oldStatus, to: targetStatus },
       });
     } catch {}
-    void postActivityToLoka(afPath, task.ticket, `📋 Task moved: ${oldStatus} → ${targetStatus}`);
+
+    // Unified post-action sync to Loka (fire-and-forget — local file is source of truth)
+    void postActionSync(afPath, meta, task.ticket, 'move', { targetStatus });
 
     console.log(success(`${task.ticket}: ${oldStatus} → ${targetStatus}`));
   } catch (err: any) {
@@ -173,9 +184,27 @@ export async function taskAssignCommand(ticket: string, assignee: string, option
         meta: { ...(existing?.assignee ? { previousAssignee: existing.assignee } : {}) },
       });
     } catch {}
-    void postActivityToLoka(afPath, task.ticket, `👤 Task assigned to ${assignee}`);
+
+    // Unified post-action sync to Loka (fire-and-forget — local file is source of truth)
+    void postActionSync(afPath, meta, task.ticket, 'assign');
 
     console.log(success(`${task.ticket} assigned to ${assignee}`));
+  } catch (err: any) {
+    console.log(error(err.message));
+    process.exit(1);
+  }
+}
+
+export async function taskLogCommand(ticket: string, entry: string, options: TaskLogOptions): Promise<void> {
+  const { afPath, meta } = resolveOrExit(options.project);
+  const provider = createProvider(afPath, meta);
+
+  try {
+    await provider.log(ticket.toUpperCase(), entry);
+    console.log(success(`Logged to ${ticket.toUpperCase()}`));
+
+    // Unified post-action sync to Loka (fire-and-forget — local file is source of truth)
+    void postActionSync(afPath, meta, ticket.toUpperCase(), 'log', { logEntry: entry });
   } catch (err: any) {
     console.log(error(err.message));
     process.exit(1);

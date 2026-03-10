@@ -10,6 +10,7 @@ import {
   taskShowCommand,
   taskMoveCommand,
   taskAssignCommand,
+  taskLogCommand,
 } from './commands/task.js';
 import {
   agentListCommand,
@@ -91,6 +92,12 @@ task
   .description('Assign a task to an agent')
   .option('-p, --project <prefix>', 'Project prefix')
   .action(taskAssignCommand);
+
+task
+  .command('log <ticket> <entry>')
+  .description('Add a log entry to a task')
+  .option('-p, --project <prefix>', 'Project prefix')
+  .action(taskLogCommand);
 
 // --- Agent commands ---
 
