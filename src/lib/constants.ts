@@ -1,0 +1,32 @@
+import { homedir } from 'os';
+import { join } from 'path';
+
+export const AF_DIR = '.af';
+export const GLOBAL_DIR = join(homedir(), '.af');
+export const GLOBAL_CONFIG = join(GLOBAL_DIR, 'config.yaml');
+export const AGENTS_DIR = join(homedir(), 'projects', 'agent-factory', 'agents');
+
+export const STATUSES = [
+  'backlog',
+  'open',
+  'in-progress',
+  'ready-for-qa',
+  'uat',
+  'ready-4-release',
+  'released',
+  'closed',
+  'blocked',
+] as const;
+
+export type TaskStatus = (typeof STATUSES)[number];
+
+export const TYPES = ['bug', 'chore', 'epic', 'feature', 'improvement', 'task'] as const;
+export type TaskType = (typeof TYPES)[number];
+
+export const PRIORITIES = ['critical', 'high', 'medium', 'low'] as const;
+export type Priority = (typeof PRIORITIES)[number];
+
+export const COMPLEXITIES = ['low', 'medium', 'high'] as const;
+export type Complexity = (typeof COMPLEXITIES)[number];
+
+export const PROJECT_STATUSES = ['inception', 'active', 'paused', 'archived'] as const;

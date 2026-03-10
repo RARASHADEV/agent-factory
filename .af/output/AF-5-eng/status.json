@@ -1,0 +1,10 @@
+{
+  "pid": 3246909,
+  "status": "running",
+  "agent": "engineer",
+  "ticket": "AF-5",
+  "startedAt": "2026-03-10T15:30:24.815Z",
+  "completedAt": null,
+  "success": false,
+  "error": null
+}
