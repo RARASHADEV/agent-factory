@@ -37,6 +37,7 @@ program
 program
   .command('projects')
   .description('List all registered projects')
+  .option('-d, --detail', 'Show task counts bucketed by status across all projects')
   .action(projectsCommand);
 
 program
