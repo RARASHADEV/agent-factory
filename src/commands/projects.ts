@@ -1,10 +1,10 @@
 import chalk from 'chalk';
 import Table from 'cli-table3';
 import { listProjects } from '../lib/workspace.js';
-import { listTasks } from '../lib/workspace.js';
-import type { TaskFile } from '../lib/workspace.js';
-import { heading, dim, warn, formatTaskLine } from '../lib/format.js';
+import { FileProvider } from '../lib/providers/file-provider.js';
+import { heading, dim, formatTaskLine } from '../lib/format.js';
 import { existsSync } from 'fs';
+import type { Task } from '../lib/task-provider.js';
 
 interface ProjectOptions {
   detail?: boolean;
@@ -15,18 +15,18 @@ interface ProjectSummary {
   name: string;
   path: string;
   counts: {
-    open: number;       // open + backlog
-    inProgress: number; // in-progress + ready-for-qa + uat + ready-4-release
-    blocked: number;    // blocked
-    done: number;       // released + closed
+    open: number;
+    inProgress: number;
+    blocked: number;
+    done: number;
     total: number;
   };
-  blockedTasks: TaskFile[];
+  blockedTasks: Task[];
 }
 
-export function projectsCommand(options: ProjectOptions = {}): void {
+export async function projectsCommand(options: ProjectOptions = {}): Promise<void> {
   if (options.detail) {
-    projectsDetailCommand();
+    await projectsDetailCommand();
     return;
   }
 
@@ -41,11 +41,12 @@ export function projectsCommand(options: ProjectOptions = {}): void {
   console.log('');
 
   for (const project of projects) {
-    const tasks = listTasks(project.afPath);
-    const inProgress = tasks.filter(t => t.meta.status === 'in-progress').length;
-    const open = tasks.filter(t => t.meta.status === 'open').length;
-    const backlog = tasks.filter(t => t.meta.status === 'backlog').length;
-    const blocked = tasks.filter(t => t.meta.status === 'blocked').length;
+    const provider = new FileProvider(project.afPath, project.meta);
+    const tasks = await provider.list();
+    const inProgress = tasks.filter(t => t.status === 'in-progress').length;
+    const open = tasks.filter(t => t.status === 'open').length;
+    const backlog = tasks.filter(t => t.status === 'backlog').length;
+    const blocked = tasks.filter(t => t.status === 'blocked').length;
 
     const statusBadge = project.meta.status === 'active'
       ? chalk.green('● active')
@@ -70,7 +71,7 @@ export function projectsCommand(options: ProjectOptions = {}): void {
   }
 }
 
-function projectsDetailCommand(): void {
+async function projectsDetailCommand(): Promise<void> {
   const projects = listProjects();
 
   if (projects.length === 0) {
@@ -92,26 +93,27 @@ function projectsDetailCommand(): void {
       continue;
     }
 
-    let tasks: TaskFile[];
+    let tasks: Task[];
     try {
-      tasks = listTasks(project.afPath);
+      const provider = new FileProvider(project.afPath, project.meta);
+      tasks = await provider.list();
     } catch {
       console.error(chalk.dim(`⚠ Project ${project.meta.prefix} unreadable, skipping`));
       continue;
     }
 
-    const openCount = tasks.filter(t => t.meta.status === 'open' || t.meta.status === 'backlog').length;
+    const openCount = tasks.filter(t => t.status === 'open' || t.status === 'backlog').length;
     const inProgressCount = tasks.filter(t =>
-      t.meta.status === 'in-progress' ||
-      t.meta.status === 'ready-for-qa' ||
-      t.meta.status === 'uat' ||
-      t.meta.status === 'ready-4-release'
+      t.status === 'in-progress' ||
+      t.status === 'ready-for-qa' ||
+      t.status === 'uat' ||
+      t.status === 'ready-4-release'
     ).length;
-    const blockedCount = tasks.filter(t => t.meta.status === 'blocked').length;
-    const doneCount = tasks.filter(t => t.meta.status === 'released' || t.meta.status === 'closed').length;
+    const blockedCount = tasks.filter(t => t.status === 'blocked').length;
+    const doneCount = tasks.filter(t => t.status === 'released' || t.status === 'closed').length;
     const total = tasks.length;
 
-    const blockedTasks = tasks.filter(t => t.meta.status === 'blocked');
+    const blockedTasks = tasks.filter(t => t.status === 'blocked');
 
     summaries.push({
       prefix: project.meta.prefix,
@@ -214,7 +216,7 @@ function projectsDetailCommand(): void {
     console.log('');
     console.log(chalk.bold('  Blocked Items'));
     for (const { task, prefix } of allBlockedTasks) {
-      console.log(`    ${formatTaskLine(task.meta)}  ${chalk.dim(`(${prefix})`)}`);
+      console.log(`    ${formatTaskLine(task)}  ${chalk.dim(`(${prefix})`)}`);
     }
   }
 }

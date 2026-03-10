@@ -5,7 +5,8 @@ import matter from 'gray-matter';
 import chalk from 'chalk';
 import { AGENTS_DIR } from '../lib/constants.js';
 import { loadConfig } from '../lib/config.js';
-import { resolveProject, findTask } from '../lib/workspace.js';
+import { resolveProject } from '../lib/workspace.js';
+import { createProvider } from '../lib/provider-factory.js';
 import { heading, success, error, dim } from '../lib/format.js';
 import { auditLog } from '../lib/audit.js';
 
@@ -348,7 +349,8 @@ export async function agentSpawnCommand(slug: string, options: SpawnOptions): Pr
   }
 
   const { afPath, meta: projectMeta } = resolved;
-  const task = findTask(afPath, options.task!.toUpperCase());
+  const provider = createProvider(afPath, projectMeta);
+  const task = await provider.get(options.task!.toUpperCase());
 
   if (!task) {
     console.log(error(`Task ${options.task} not found.`));
@@ -356,7 +358,7 @@ export async function agentSpawnCommand(slug: string, options: SpawnOptions): Pr
   }
 
   // Block spawning on blocked tasks
-  if (task.meta.status === 'blocked') {
+  if (task.status === 'blocked') {
     console.log(error(`Task ${options.task} is blocked. Unblock it first with \`af task move ${options.task} open\`.`));
     process.exit(1);
   }
@@ -386,7 +388,7 @@ export async function agentSpawnCommand(slug: string, options: SpawnOptions): Pr
     projectContent.trim(),
     '',
     '## Task',
-    readFileSync(task.filePath, 'utf-8').trim(),
+    readFileSync(task.filePath!, 'utf-8').trim(),
     contextContent ? `\n## Context\n${contextContent.trim()}` : '',
   ].filter(Boolean).join('\n');
 
@@ -403,13 +405,13 @@ export async function agentSpawnCommand(slug: string, options: SpawnOptions): Pr
   // Resolve project directory from afPath (go up one level from .af/)
   const projectDir = join(afPath, '..');
 
-  console.log(chalk.cyan(`⚡ Spawning ${chalk.bold(slug)} on ${chalk.bold(task.meta.ticket)}: ${task.meta.title}`));
+  console.log(chalk.cyan(`⚡ Spawning ${chalk.bold(slug)} on ${chalk.bold(task.ticket)}: ${task.title}`));
   console.log(dim(`Model: ${agent.meta.model || config.defaults.model}`));
   console.log('');
 
   if (options.background) {
     // ── Background mode: use SDK via detached subprocess ─────────────
-    const outputDir = join(afPath, 'output', task.meta.ticket);
+    const outputDir = join(afPath, 'output', task.ticket, slug);
     mkdirSync(outputDir, { recursive: true });
 
     const spawnConfig = {
@@ -420,7 +422,7 @@ export async function agentSpawnCommand(slug: string, options: SpawnOptions): Pr
       tools: agent.meta.tools || undefined,
       cwd: projectDir,
       outputDir,
-      ticket: task.meta.ticket,
+      ticket: task.ticket,
       agentSlug: slug,
       afPath,
     };
@@ -450,7 +452,7 @@ export async function agentSpawnCommand(slug: string, options: SpawnOptions): Pr
       pid: child.pid,
       status: 'starting',
       agent: slug,
-      ticket: task.meta.ticket,
+      ticket: task.ticket,
       startedAt: new Date().toISOString(),
     }, null, 2));
 
@@ -458,10 +460,10 @@ export async function agentSpawnCommand(slug: string, options: SpawnOptions): Pr
     try {
       auditLog(afPath, {
         event: 'spawn.start',
-        ticket: task.meta.ticket,
+        ticket: task.ticket,
         agent: slug,
         actor: 'cli',
-        detail: `Spawned ${slug} on ${task.meta.ticket} (background)`,
+        detail: `Spawned ${slug} on ${task.ticket} (background)`,
         meta: { mode: 'background', pid: child.pid },
       });
     } catch {}
@@ -472,7 +474,7 @@ export async function agentSpawnCommand(slug: string, options: SpawnOptions): Pr
     console.log(dim(`  Status: ${statusFile}`));
     console.log(dim(`  Log: ${logFile}`));
     console.log('');
-    console.log(dim('Check status: af agent status ' + task.meta.ticket));
+    console.log(dim('Check status: af agent status ' + task.ticket));
     return;
   }
 
@@ -495,10 +497,10 @@ export async function agentSpawnCommand(slug: string, options: SpawnOptions): Pr
   try {
     auditLog(afPath, {
       event: 'spawn.start',
-      ticket: task.meta.ticket,
+      ticket: task.ticket,
       agent: slug,
       actor: 'cli',
-      detail: `Spawned ${slug} on ${task.meta.ticket} (foreground)`,
+      detail: `Spawned ${slug} on ${task.ticket} (foreground)`,
       meta: { mode: 'foreground' },
     });
   } catch {}
@@ -517,18 +519,15 @@ export async function agentSpawnCommand(slug: string, options: SpawnOptions): Pr
     const durationS = Math.round(durationMs / 1000);
 
     if (code === 0) {
-      console.log(success(`Agent ${slug} completed task ${task.meta.ticket}`));
-      // Append log entry
-      const raw = readFileSync(task.filePath, 'utf-8');
-      const timestamp = new Date().toISOString();
-      const logEntry = `- [${timestamp}] ${slug}: completed | Agent session finished.\n`;
-      writeFileSync(task.filePath, raw + logEntry);
+      console.log(success(`Agent ${slug} completed task ${task.ticket}`));
+      // Append log entry via provider
+      provider.log(task.ticket, `${slug}: completed | Agent session finished.`).catch(() => {});
 
       // Audit: spawn.complete
       try {
         auditLog(afPath, {
           event: 'spawn.complete',
-          ticket: task.meta.ticket,
+          ticket: task.ticket,
           agent: slug,
           actor: slug,
           detail: `Completed in ${durationS}s`,
@@ -542,7 +541,7 @@ export async function agentSpawnCommand(slug: string, options: SpawnOptions): Pr
       try {
         auditLog(afPath, {
           event: 'spawn.fail',
-          ticket: task.meta.ticket,
+          ticket: task.ticket,
           agent: slug,
           actor: slug,
           detail: `Failed: exited with code ${code}`,

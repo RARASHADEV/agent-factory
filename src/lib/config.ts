@@ -8,10 +8,19 @@ export interface ProjectEntry {
   prefix: string;
 }
 
+export interface LokaConfig {
+  url: string;
+  apiKey: string;
+  /** Optional status name overrides: AF slug → Loka status name */
+  statusMap?: Record<string, string>;
+}
+
 export interface GlobalConfig {
   defaults: {
     model: string;
     max_turns: number;
+    /** "file" (default) or "loka" — selects the TaskProvider backend */
+    taskBackend?: 'file' | 'loka';
   };
   projects: ProjectEntry[];
   agents: {
@@ -24,6 +33,8 @@ export interface GlobalConfig {
   sdk: {
     cli: string;
   };
+  /** Loka backend configuration (required when defaults.taskBackend = "loka") */
+  loka?: LokaConfig;
 }
 
 const DEFAULT_CONFIG: GlobalConfig = {

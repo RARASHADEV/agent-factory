@@ -1,7 +1,7 @@
-import { existsSync, readdirSync, readFileSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { join, resolve } from 'path';
 import matter from 'gray-matter';
-import { AF_DIR, STATUSES, type TaskStatus } from './constants.js';
+import { AF_DIR } from './constants.js';
 import { loadConfig, type ProjectEntry } from './config.js';
 
 export interface ProjectMeta {
@@ -15,27 +15,6 @@ export interface ProjectMeta {
   origin?: string;
   stack?: string;
   [key: string]: unknown;
-}
-
-export interface TaskMeta {
-  ticket: string;
-  title: string;
-  type: string;
-  status: TaskStatus;
-  priority: string;
-  complexity: string;
-  assignee?: string;
-  depends?: string[];
-  due?: string;
-  created: string;
-  updated: string;
-  [key: string]: unknown;
-}
-
-export interface TaskFile {
-  meta: TaskMeta;
-  content: string;
-  filePath: string;
 }
 
 export interface ProjectInfo {
@@ -62,59 +41,6 @@ export function loadProject(afPath: string): ProjectMeta | null {
   const raw = readFileSync(projectFile, 'utf-8');
   const { data } = matter(raw);
   return data as ProjectMeta;
-}
-
-/**
- * List all tasks in a workspace, optionally filtering by status.
- */
-export function listTasks(afPath: string, filters?: { status?: TaskStatus; assignee?: string; priority?: string }): TaskFile[] {
-  const tasksDir = join(afPath, 'tasks');
-  if (!existsSync(tasksDir)) return [];
-
-  const tasks: TaskFile[] = [];
-  const statusDirs = filters?.status ? [filters.status] : [...STATUSES];
-
-  for (const status of statusDirs) {
-    const statusDir = join(tasksDir, status);
-    if (!existsSync(statusDir)) continue;
-
-    const files = readdirSync(statusDir).filter(f => f.endsWith('.md'));
-    for (const file of files) {
-      const filePath = join(statusDir, file);
-      const raw = readFileSync(filePath, 'utf-8');
-      const { data, content } = matter(raw);
-      const meta = data as TaskMeta;
-
-      // Apply filters
-      if (filters?.assignee && meta.assignee !== filters.assignee) continue;
-      if (filters?.priority && meta.priority !== filters.priority) continue;
-
-      tasks.push({ meta, content, filePath });
-    }
-  }
-
-  return tasks;
-}
-
-/**
- * Find a specific task by ticket number.
- */
-export function findTask(afPath: string, ticket: string): TaskFile | null {
-  const tasksDir = join(afPath, 'tasks');
-  if (!existsSync(tasksDir)) return null;
-
-  const filename = `${ticket}.md`;
-
-  for (const status of STATUSES) {
-    const filePath = join(tasksDir, status, filename);
-    if (existsSync(filePath)) {
-      const raw = readFileSync(filePath, 'utf-8');
-      const { data, content } = matter(raw);
-      return { meta: data as TaskMeta, content, filePath };
-    }
-  }
-
-  return null;
 }
 
 /**
