@@ -1,0 +1,36 @@
+name: sdlc
+description: Full SDLC — design through verification
+
+phases:
+  - name: design
+    agent: architect
+    gate:
+      field: status
+      operator: eq
+      value: complete
+
+  - name: implement
+    agent: engineer
+    requires: [design]
+    inject:
+      - from: design
+        artifact: "docs/designs/{ticket}*.md"
+        as: design_document
+    gate:
+      field: metadata.pr_url
+      operator: exists
+
+  - name: verify
+    agent: qa
+    requires: [implement]
+    inject:
+      - from: design
+        artifact: "docs/designs/{ticket}*.md"
+        as: design_document
+      - from: implement
+        artifact: metadata.pr_url
+        as: pr_to_review
+    gate:
+      field: metadata.verdict
+      operator: eq
+      value: PASS
