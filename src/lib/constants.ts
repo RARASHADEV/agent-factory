@@ -41,3 +41,6 @@ export const ENABLE_AF_12 = true;
 
 /** AF-13: Auto-create Loka project + inline sync on task mutations. When false, preserves original throw behavior. */
 export const ENABLE_AF_13 = true;
+
+/** AF-23: Structured result.json output. When false, spawn-runner skips result.json extraction/writing. */
+export const ENABLE_AF_23 = true;

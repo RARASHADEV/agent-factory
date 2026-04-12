@@ -18,6 +18,8 @@ import { join } from 'path';
 import { runAgent } from './lib/sdk.js';
 import { auditLog } from './lib/audit.js';
 import { postActivityToLoka } from './lib/audit-bridge.js';
+import { extractResultJson, synthesizeResult, type ResultSchema } from './lib/result-schema.js';
+import { ENABLE_AF_23 } from './lib/constants.js';
 
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
 
@@ -128,6 +130,36 @@ async function main() {
     status.success = result.success;
     writeFileSync(statusFile, JSON.stringify(status, null, 2));
 
+    // AF-23: Extract or synthesize result.json
+    let resultJsonFile: string | undefined;
+    let resultData: ResultSchema | undefined;
+    if (ENABLE_AF_23) {
+      resultJsonFile = join(config.outputDir, 'result.json');
+      const resultText = result.result || '';
+
+      const extraction = extractResultJson(resultText);
+
+      if (extraction && extraction.valid) {
+        resultData = extraction.data;
+      } else {
+        if (extraction && !extraction.valid) {
+          console.warn(`[result-json] Extraction found block but validation failed: ${extraction.errors.join(', ')}`);
+        }
+        resultData = synthesizeResult({
+          status: status.status,
+          success: result.success,
+          agent: config.agentSlug,
+          ticket: config.ticket,
+        });
+      }
+
+      try {
+        writeFileSync(resultJsonFile, JSON.stringify(resultData, null, 2));
+      } catch (writeErr: any) {
+        console.warn(`[result-json] Failed to write result.json: ${writeErr.message}`);
+      }
+    }
+
     // Audit: spawn.complete
     const resolvedAfPath = config.afPath || join(config.outputDir, '..', '..');
     try {
@@ -137,7 +169,12 @@ async function main() {
         agent: config.agentSlug,
         actor: config.agentSlug,
         detail: `Completed in ${Math.round(result.durationMs / 1000)}s`,
-        meta: { success: result.success, durationMs: result.durationMs },
+        meta: {
+          success: result.success,
+          durationMs: result.durationMs,
+          ...(resultJsonFile ? { resultJsonPath: resultJsonFile } : {}),
+          ...(resultData ? { resultSynthetic: resultData._synthetic } : {}),
+        },
       });
     } catch {}
     void postActivityToLoka(
@@ -159,6 +196,24 @@ async function main() {
 
     // Also write to crash.log for forensics
     appendFileSync(crashLog, `[${new Date().toISOString()}] caught error\n${stack}\n\n`);
+
+    // AF-23: Write synthetic result.json on failure
+    if (ENABLE_AF_23) {
+      const resultJsonFile = join(config.outputDir, 'result.json');
+      const failedResult = synthesizeResult({
+        status: 'failed',
+        success: false,
+        agent: config.agentSlug,
+        ticket: config.ticket,
+      });
+      failedResult.blockers = [err.message || String(err)];
+
+      try {
+        writeFileSync(resultJsonFile, JSON.stringify(failedResult, null, 2));
+      } catch (writeErr: any) {
+        console.warn(`[result-json] Failed to write result.json: ${writeErr.message}`);
+      }
+    }
 
     // Audit: spawn.fail
     const resolvedAfPathFail = config.afPath || join(config.outputDir, '..', '..');

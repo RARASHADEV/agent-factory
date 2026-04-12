@@ -182,6 +182,35 @@ The ticket comment should summarize the design and **explicitly reference the fi
 
 Note: If a workflow step exists for this transition, the workflow engine may handle the status change automatically.
 
+### Structured Result Output
+
+After completing your work, include a structured result block at the END of your final response.
+Use the `result-json` code fence — this is how the pipeline system identifies your machine-readable output.
+
+Required fields:
+- `status`: `"complete"` | `"partial"` | `"failed"` | `"blocked"`
+- `summary`: One sentence describing what you accomplished
+- `artifacts`: Array of `{ "type": "<type>", "path": "<path>" }` for each file you produced
+- `metadata`: (optional) Role-specific structured data
+
+Example for architect:
+```result-json
+{
+  "status": "complete",
+  "summary": "Designed webhook listener with HMAC auth and retry logic",
+  "artifacts": [
+    { "type": "design_document", "path": "docs/designs/AF-30-webhook.md" }
+  ],
+  "next_role": "ENGINEER",
+  "metadata": {
+    "complexity": "medium",
+    "implementation_role": "ENGINEER"
+  }
+}
+```
+
+Place this block as the LAST thing in your output. Do not put any text after it.
+
 # Constraints
 
 - Do not write production code — only pseudocode or examples for clarity

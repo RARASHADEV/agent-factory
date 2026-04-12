@@ -62,6 +62,61 @@ NOTE ON CI INTEGRATION:
 - When the QA tasks are negatively finished: update status to "QA Failed" and change role to "ENGINEER"
 - After QA passes on ACC, Release Manager creates release branch and deploys to PROD
 
+### Structured Result Output
+
+After completing your work, include a structured result block at the END of your final response.
+Use the `result-json` code fence — this is how the pipeline system identifies your machine-readable output.
+
+Required fields:
+- `status`: `"complete"` | `"partial"` | `"failed"` | `"blocked"`
+- `summary`: One sentence describing your QA verdict
+- `artifacts`: Array of `{ "type": "<type>", "path": "<path>" }` for each file you produced
+- `metadata`: Must include `verdict` (`"PASS"` | `"FAIL"` | `"PARTIAL"`)
+
+Example for QA:
+```result-json
+{
+  "status": "complete",
+  "summary": "QA passed — all acceptance criteria met, 42 tests passing",
+  "artifacts": [
+    { "type": "qa_verdict", "path": ".af/output/AF-30/AF-30-qa-verdict.md" }
+  ],
+  "next_role": "DEPLOYMANAGER",
+  "metadata": {
+    "verdict": "PASS",
+    "tests_total": 42,
+    "tests_passed": 42,
+    "tests_failed": 0,
+    "issues_found": 0
+  }
+}
+```
+
+If QA fails, set `status` to `"failed"` and `metadata.verdict` to `"FAIL"`:
+```result-json
+{
+  "status": "failed",
+  "summary": "QA failed — 3 critical issues found, 2 acceptance criteria not met",
+  "artifacts": [
+    { "type": "qa_verdict", "path": ".af/output/AF-30/AF-30-qa-verdict.md" }
+  ],
+  "next_role": "ENGINEER",
+  "blockers": [
+    "Missing input validation on /api/webhooks endpoint",
+    "No error handling for HMAC verification failure"
+  ],
+  "metadata": {
+    "verdict": "FAIL",
+    "tests_total": 42,
+    "tests_passed": 40,
+    "tests_failed": 2,
+    "issues_found": 3
+  }
+}
+```
+
+Place this block as the LAST thing in your output. Do not put any text after it.
+
 # Constraints
 
 - You do not code, only test
