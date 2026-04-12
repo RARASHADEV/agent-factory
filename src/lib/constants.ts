@@ -44,3 +44,6 @@ export const ENABLE_AF_13 = true;
 
 /** AF-23: Structured result.json output. When false, spawn-runner skips result.json extraction/writing. */
 export const ENABLE_AF_23 = true;
+
+/** AF-25: Artifact injection. When false, pipeline runner skips inject resolution. */
+export const ENABLE_AF_25 = true;
