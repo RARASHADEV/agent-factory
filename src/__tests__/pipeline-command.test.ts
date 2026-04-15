@@ -211,11 +211,10 @@ describe('pipeline state integration — simulated phase outcomes', () => {
     );
 
     assert.equal(outcome.passed, false);
-    if (!outcome.passed) {
-      assert.equal(outcome.field, 'metadata.pr_url');
-      assert.equal(outcome.operator, 'exists');
-      assert.match(outcome.message, /expected field to exist/);
-    }
+    assert.equal(outcome.failures.length, 1);
+    assert.equal(outcome.failures[0].condition.field, 'metadata.pr_url');
+    assert.equal(outcome.failures[0].condition.operator, 'exists');
+    assert.match(outcome.failures[0].message, /expected field to exist/);
   });
 
   it('writing state + marking phases skipped works end-to-end', () => {
