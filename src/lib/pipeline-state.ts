@@ -24,12 +24,20 @@ export type GateResult = 'pass' | 'fail' | 'skipped';
 
 // --- Failure record ---
 
+/**
+ * Flat record for a single gate failure as persisted in pipeline-state.json.
+ * AF-27 adds `remediation`. `gateFailure` (singular) is retained for backward
+ * compatibility with AF-26 readers; `gateFailures` (plural) is the canonical
+ * multi-failure record introduced in AF-27.
+ */
 export interface GateFailureRecord {
   field: string;
   operator: string;
   expected?: unknown;
   actual: unknown;
   message: string;
+  /** AF-27: one-line suggestion for how to fix this failure. */
+  remediation?: string;
 }
 
 // --- Phase state ---
@@ -41,7 +49,22 @@ export interface PhaseState {
   completedAt?: string;
   durationMs?: number;
   gateResult?: GateResult;
+  /**
+   * AF-27: all failing conditions from the gate evaluation (multi-failure support).
+   * Populated with the final attempt's failures when a gate fails.
+   */
+  gateFailures?: GateFailureRecord[];
+  /**
+   * Mirrors `gateFailures[0]` when present, for backward compatibility with
+   * AF-26 consumers (e.g. AF-28 status renderer reading the singular field).
+   */
   gateFailure?: GateFailureRecord;
+  /**
+   * AF-27: number of subprocess attempts for this phase.
+   * 1 = single-shot (AF-26 behavior); 2+ = retried at least once.
+   * Omitted when the phase was skipped or never spawned.
+   */
+  attempts?: number;
   /**
    * Reason for failure, when status === 'failed'.
    * One of: 'spawn_error', 'no_result_json', 'gate_failure'.

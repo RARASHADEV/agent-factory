@@ -27,7 +27,7 @@ import { join, relative } from 'path';
 import { spawn } from 'child_process';
 import chalk from 'chalk';
 
-import { ENABLE_AF_26 } from '../lib/constants.js';
+import { ENABLE_AF_26, ENABLE_AF_27 } from '../lib/constants.js';
 import { loadConfig } from '../lib/config.js';
 import { resolveProject } from '../lib/workspace.js';
 import { createProvider } from '../lib/provider-factory.js';
@@ -52,7 +52,9 @@ import {
 import {
   evaluateGate,
   type GateEvaluationResult,
+  type GateFailure,
 } from '../lib/gate-evaluator.js';
+import type { ResultSchema } from '../lib/result-schema.js';
 import {
   writePipelineState,
   initPipelineState,
@@ -107,14 +109,45 @@ function phaseIcon(status: PhaseStatus): string {
 }
 
 /**
- * Format a gate condition as "field operator value?" — omits value for
- * existence operators.
+ * Format a single gate condition as "field operator value?" — omits value
+ * for existence operators.
  */
-function formatGate(gate: GateDefinition): string {
-  if (gate.operator === 'exists' || gate.operator === 'not_exists') {
-    return `${gate.field} ${gate.operator}`;
+function formatCondition(cond: {
+  field: string;
+  operator: string;
+  value?: unknown;
+}): string {
+  if (cond.operator === 'exists' || cond.operator === 'not_exists') {
+    return `${cond.field} ${cond.operator}`;
   }
-  return `${gate.field} ${gate.operator} ${JSON.stringify(gate.value)}`;
+  return `${cond.field} ${cond.operator} ${JSON.stringify(cond.value)}`;
+}
+
+/**
+ * Format a gate for display in the execution plan.
+ * Handles shorthand, `all`, and `any` compound forms.
+ */
+function formatGate(gate: GateDefinition): string[] {
+  const lines: string[] = [];
+
+  // Shorthand (AF-26 compat)
+  if (gate.field !== undefined && gate.operator !== undefined) {
+    lines.push(
+      formatCondition({ field: gate.field, operator: gate.operator, value: gate.value }),
+    );
+  } else if (Array.isArray(gate.all)) {
+    lines.push(`(all)`);
+    for (const c of gate.all) lines.push(`  - ${formatCondition(c)}`);
+  } else if (Array.isArray(gate.any)) {
+    lines.push(`(any)`);
+    for (const c of gate.any) lines.push(`  - ${formatCondition(c)}`);
+  }
+
+  if (typeof gate.retry === 'number' && gate.retry > 0) {
+    lines.push(`retry: ${gate.retry}`);
+  }
+
+  return lines;
 }
 
 // ============================================================
@@ -313,42 +346,58 @@ export async function pipelineRunCommand(
       process.exit(1);
     }
 
-    // 10c. Spawn (synchronous, not detached)
+    // 10c. Spawn + evaluate gate — with optional retry (AF-27)
     const phaseOutputDir = join(pipelineOutputDir, phase.agent);
     mkdirSync(phaseOutputDir, { recursive: true });
-    const spawnOk = await runPhaseSubprocess({
-      systemPrompt,
-      agentSlug: phase.agent,
-      ticket: task.ticket,
-      cwd: projectDir,
-      outputDir: phaseOutputDir,
-      afPath,
+
+    const rawRetry = ENABLE_AF_27 ? (phase.gate?.retry ?? 0) : 0;
+    const maxAttempts = 1 + Math.max(0, rawRetry);
+
+    const outcome = await runPhaseWithRetry({
+      phase,
+      maxAttempts,
+      spawn: () =>
+        runPhaseSubprocess({
+          systemPrompt,
+          agentSlug: phase.agent,
+          ticket: task.ticket,
+          cwd: projectDir,
+          outputDir: phaseOutputDir,
+          afPath,
+        }),
+      loadResult: () => {
+        const r = loadPhaseResultJson(phase.name, ctx);
+        if (r && (r as ResultSchema)._synthetic) {
+          console.log(
+            warn(
+              `  Phase ${phase.name}: result.json is synthetic — agent did not emit a structured result-json block`,
+            ),
+          );
+        }
+        return r as ResultSchema | null;
+      },
+      onRetry: (attempt, mx, failures) => {
+        auditLog(afPath, {
+          event: 'pipeline.phase_retry',
+          ticket: task.ticket,
+          agent: phase.agent,
+          actor: 'cli',
+          detail: `Phase ${phase.name} retrying (attempt ${attempt}/${mx})`,
+          meta: { phase: phase.name, attempt, maxAttempts: mx, failures },
+        });
+        console.log(
+          warn(`  Gate failed on attempt ${attempt}/${mx} — retrying`),
+        );
+        for (const f of failures) {
+          console.log(dim(`    ${f.message}`));
+        }
+      },
     });
 
-    // 10d. Load result, evaluate gate
-    const phaseResult = loadPhaseResultJson(phase.name, ctx);
-    let gateEval: GateEvaluationResult | null = null;
-    let phaseStatus: PhaseStatus = 'completed';
-    let failureReason: 'spawn_error' | 'no_result_json' | 'gate_failure' | undefined;
-
-    if (!spawnOk) {
-      phaseStatus = 'failed';
-      failureReason = 'spawn_error';
-    } else if (!phaseResult) {
-      phaseStatus = 'failed';
-      failureReason = 'no_result_json';
-    } else {
-      if (phaseResult._synthetic) {
-        console.log(warn(`  Phase ${phase.name}: result.json is synthetic — agent did not emit a structured result-json block`));
-      }
-      if (phase.gate) {
-        gateEval = evaluateGate(phase.gate, phaseResult);
-        if (!gateEval.passed) {
-          phaseStatus = 'failed';
-          failureReason = 'gate_failure';
-        }
-      }
-    }
+    const attempts = outcome.attempts;
+    const gateEval = outcome.gateEval;
+    const phaseStatus = outcome.phaseStatus;
+    const failureReason = outcome.failureReason;
 
     const phaseDuration = Date.now() - phaseStart;
     const ps = state.phases[phase.name];
@@ -356,17 +405,25 @@ export async function pipelineRunCommand(
     ps.completedAt = new Date().toISOString();
     ps.durationMs = phaseDuration;
     ps.outputDir = relative(afPath, phaseOutputDir);
+    ps.attempts = attempts;
 
     if (gateEval) {
       ps.gateResult = gateEval.passed ? 'pass' : 'fail';
       if (!gateEval.passed) {
-        ps.gateFailure = {
-          field: gateEval.field,
-          operator: gateEval.operator,
-          expected: gateEval.expected,
-          actual: gateEval.actual,
-          message: gateEval.message,
-        };
+        ps.gateFailures = gateEval.failures.map((f) => ({
+          field: f.condition.field,
+          operator: f.condition.operator,
+          expected: f.condition.value,
+          actual: f.actual,
+          message: f.message,
+          remediation: f.remediation,
+        }));
+        // Back-compat: mirror first failure into the singular field
+        ps.gateFailure = ps.gateFailures[0];
+      } else {
+        // Clear any prior stale failure record
+        ps.gateFailures = undefined;
+        ps.gateFailure = undefined;
       }
     } else if (!phase.gate) {
       ps.gateResult = 'skipped';
@@ -379,7 +436,7 @@ export async function pipelineRunCommand(
     // 10e. Decide to continue or stop
     if (phaseStatus === 'failed') {
       const failMessage =
-        ps.gateFailure?.message ??
+        ps.gateFailures?.[0]?.message ??
         (failureReason === 'spawn_error'
           ? 'spawn exited non-zero'
           : failureReason === 'no_result_json'
@@ -387,6 +444,12 @@ export async function pipelineRunCommand(
             : `Phase ${phase.name} failed`);
 
       console.log(error(`  ${failMessage}`));
+      // Print remaining gate failures (if any) for visibility
+      if (ps.gateFailures && ps.gateFailures.length > 1) {
+        for (const f of ps.gateFailures.slice(1)) {
+          console.log(error(`  ${f.message}`));
+        }
+      }
 
       auditLog(afPath, {
         event: 'pipeline.phase_fail',
@@ -397,7 +460,9 @@ export async function pipelineRunCommand(
         meta: {
           phase: phase.name,
           reason: failureReason,
+          attempts,
           gateFailure: ps.gateFailure,
+          gateFailures: ps.gateFailures,
         },
       });
 
@@ -406,7 +471,10 @@ export async function pipelineRunCommand(
       process.exit(1);
     }
 
-    console.log(success(`  Phase ${phase.name} completed (${formatDuration(phaseDuration)})`));
+    const attemptsSuffix = attempts > 1 ? dim(` (attempts: ${attempts})`) : '';
+    console.log(
+      success(`  Phase ${phase.name} completed (${formatDuration(phaseDuration)})`) + attemptsSuffix,
+    );
     console.log('');
 
     auditLog(afPath, {
@@ -419,6 +487,7 @@ export async function pipelineRunCommand(
         phase: phase.name,
         durationMs: phaseDuration,
         gateResult: ps.gateResult,
+        attempts,
       },
     });
   }
@@ -441,6 +510,111 @@ export async function pipelineRunCommand(
   });
 
   printSuccessSummary(state, name, pipelineOutputDir, pipelineStart);
+}
+
+// ============================================================
+// Phase retry loop (AF-27)
+// ============================================================
+
+/**
+ * Outcome of executing a phase (possibly with retries).
+ * Pure — captures the final state of the attempt(s); the caller persists it.
+ */
+export interface PhaseExecOutcome {
+  attempts: number;
+  spawnOk: boolean;
+  phaseResult: ResultSchema | null;
+  gateEval: GateEvaluationResult | null;
+  phaseStatus: PhaseStatus;
+  failureReason?: 'spawn_error' | 'no_result_json' | 'gate_failure';
+}
+
+/**
+ * Arguments for runPhaseWithRetry — all side effects are injected so the
+ * retry loop itself is deterministic and unit-testable.
+ */
+export interface RunPhaseWithRetryArgs {
+  phase: PhaseDefinition;
+  maxAttempts: number;
+  /** Spawn the phase's subprocess. Returns true on exit 0, false otherwise. */
+  spawn: () => Promise<boolean>;
+  /** Load the phase's result.json. Returns null when missing or malformed. */
+  loadResult: () => ResultSchema | null;
+  /** Called once per retry (i.e. after attempt N fails the gate, with N < maxAttempts). */
+  onRetry?: (attempt: number, maxAttempts: number, failures: GateFailure[]) => void;
+}
+
+/**
+ * Execute a single pipeline phase with optional retry on gate failure.
+ *
+ * Rules:
+ *   - spawn_error (spawn returned false): fail-fast, no retry.
+ *   - no_result_json (loadResult returned null): fail-fast, no retry.
+ *   - gate failure: retry up to maxAttempts total attempts.
+ *   - no gate: first successful spawn + result counts as passing.
+ *
+ * Pure coordinator — does not write state or audit logs; the caller does.
+ */
+export async function runPhaseWithRetry(
+  args: RunPhaseWithRetryArgs,
+): Promise<PhaseExecOutcome> {
+  const { phase, maxAttempts, spawn, loadResult, onRetry } = args;
+
+  let attempts = 0;
+  let spawnOk = false;
+  let phaseResult: ResultSchema | null = null;
+  let gateEval: GateEvaluationResult | null = null;
+  let phaseStatus: PhaseStatus = 'completed';
+  let failureReason: 'spawn_error' | 'no_result_json' | 'gate_failure' | undefined;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    attempts = attempt;
+
+    spawnOk = await spawn();
+    if (!spawnOk) {
+      phaseStatus = 'failed';
+      failureReason = 'spawn_error';
+      gateEval = null;
+      break;
+    }
+
+    phaseResult = loadResult();
+    if (!phaseResult) {
+      phaseStatus = 'failed';
+      failureReason = 'no_result_json';
+      gateEval = null;
+      break;
+    }
+
+    if (!phase.gate) {
+      phaseStatus = 'completed';
+      gateEval = null;
+      break;
+    }
+
+    gateEval = evaluateGate(phase.gate, phaseResult);
+    if (gateEval.passed) {
+      phaseStatus = 'completed';
+      break;
+    }
+
+    if (attempt < maxAttempts) {
+      onRetry?.(attempt, maxAttempts, gateEval.failures);
+      continue;
+    }
+
+    phaseStatus = 'failed';
+    failureReason = 'gate_failure';
+  }
+
+  return {
+    attempts,
+    spawnOk,
+    phaseResult,
+    gateEval,
+    phaseStatus,
+    failureReason,
+  };
 }
 
 // ============================================================
@@ -732,7 +906,15 @@ export function printExecutionPlan(
     }
 
     if (phase.gate) {
-      console.log(dim(`     gate: ${formatGate(phase.gate)}`));
+      const lines = formatGate(phase.gate);
+      if (lines.length === 1) {
+        console.log(dim(`     gate: ${lines[0]}`));
+      } else if (lines.length > 1) {
+        console.log(dim(`     gate: ${lines[0]}`));
+        for (const l of lines.slice(1)) {
+          console.log(dim(`       ${l}`));
+        }
+      }
     }
 
     console.log('');
@@ -760,13 +942,17 @@ function printSuccessSummary(
       : ps.gateResult
         ? `gate: ${ps.gateResult}`
         : '';
+    const attemptsTag =
+      typeof ps.attempts === 'number' && ps.attempts > 1
+        ? dim(`  (attempts: ${ps.attempts})`)
+        : '';
     const dur = ps.status === 'skipped'
       ? dim('—')
       : ps.durationMs !== undefined
         ? dim(formatDuration(ps.durationMs))
         : '';
     console.log(
-      `  ${icon}  ${chalk.bold(phaseName.padEnd(12))} ${dim((ps.agent ?? '').padEnd(12))} ${dur.padEnd(10)} ${gate}`,
+      `  ${icon}  ${chalk.bold(phaseName.padEnd(12))} ${dim((ps.agent ?? '').padEnd(12))} ${dur.padEnd(10)} ${gate}${attemptsTag}`,
     );
   }
 
@@ -800,6 +986,10 @@ function printFailureSummary(
     } else if (ps.gateResult) {
       gate = `gate: ${ps.gateResult}`;
     }
+    const attemptsTag =
+      typeof ps.attempts === 'number' && ps.attempts > 1
+        ? dim(`  (attempts: ${ps.attempts})`)
+        : '';
     const dur =
       ps.status === 'skipped' || ps.status === 'pending'
         ? dim('—')
@@ -807,18 +997,34 @@ function printFailureSummary(
           ? dim(formatDuration(ps.durationMs))
           : '';
     console.log(
-      `  ${icon}  ${chalk.bold(phaseName.padEnd(12))} ${dim((ps.agent ?? '').padEnd(12))} ${dur.padEnd(10)} ${gate}`,
+      `  ${icon}  ${chalk.bold(phaseName.padEnd(12))} ${dim((ps.agent ?? '').padEnd(12))} ${dur.padEnd(10)} ${gate}${attemptsTag}`,
     );
 
     if (ps.status === 'failed') {
-      const reasonMsg =
-        ps.gateFailure?.message ??
-        (ps.failureReason === 'spawn_error'
-          ? 'spawn exited non-zero'
-          : ps.failureReason === 'no_result_json'
-            ? 'result.json not written'
-            : 'phase failed');
-      console.log(chalk.red(`       ${reasonMsg}`));
+      // Multi-failure rendering: prefer gateFailures[] if present; else fallback
+      const failures =
+        ps.gateFailures && ps.gateFailures.length > 0
+          ? ps.gateFailures
+          : ps.gateFailure
+            ? [ps.gateFailure]
+            : [];
+
+      if (failures.length > 0) {
+        for (const f of failures) {
+          console.log(chalk.red(`       ${f.message}`));
+          if (f.remediation) {
+            console.log(dim(`       → ${f.remediation}`));
+          }
+        }
+      } else {
+        const reasonMsg =
+          ps.failureReason === 'spawn_error'
+            ? 'spawn exited non-zero'
+            : ps.failureReason === 'no_result_json'
+              ? 'result.json not written'
+              : 'phase failed';
+        console.log(chalk.red(`       ${reasonMsg}`));
+      }
     }
   }
 

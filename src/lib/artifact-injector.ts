@@ -87,17 +87,64 @@ export function expandTicketPlaceholder(str: string, ticket: string): string {
 }
 
 /**
- * Traverse a nested object by dot-separated path.
+ * Tokenize a dot-path, extracting both dotted segments and bracket-indexed segments.
+ *
+ * Examples:
+ *   "a.b.c"      → ["a", "b", "c"]
+ *   "a[0].c"     → ["a", 0, "c"]
+ *   "a.0.c"      → ["a", 0, "c"]  (numeric string segments coerce to number at walk-time)
+ *   "a[0].b[1]"  → ["a", 0, "b", 1]
+ */
+const DOT_PATH_SEGMENT_RE = /[^.[\]]+|\[(\d+)\]/g;
+
+export function tokenizeDotPath(path: string): (string | number)[] {
+  const out: (string | number)[] = [];
+  for (const m of path.matchAll(DOT_PATH_SEGMENT_RE)) {
+    if (m[1] !== undefined) {
+      // Bracket form [N]
+      out.push(Number(m[1]));
+    } else if (/^\d+$/.test(m[0])) {
+      // Bare numeric segment — represent as number so array indexing works
+      out.push(Number(m[0]));
+    } else {
+      out.push(m[0]);
+    }
+  }
+  return out;
+}
+
+/**
+ * Traverse a nested object by dot-path. Supports:
+ *   - Dotted segments:        "metadata.pr_url"
+ *   - Bracket indexing:       "artifacts[0].path"
+ *   - Numeric-dot indexing:   "artifacts.0.path"
+ *
+ * At each step: if `current` is an array and the token is numeric → index by int.
+ * If `current` is an object → look up by string key (numeric tokens fall back to string).
+ * Otherwise → return undefined.
  */
 export function getByDotPath(obj: Record<string, unknown>, dotPath: string): unknown {
-  const parts = dotPath.split('.');
+  const tokens = tokenizeDotPath(dotPath);
   let current: unknown = obj;
 
-  for (const part of parts) {
-    if (current === null || current === undefined || typeof current !== 'object') {
+  for (const tok of tokens) {
+    if (current === null || current === undefined) return undefined;
+
+    if (Array.isArray(current)) {
+      if (typeof tok === 'number') {
+        current = current[tok];
+      } else if (/^\d+$/.test(String(tok))) {
+        current = current[Number(tok)];
+      } else {
+        // Accessing a non-numeric key on an array — use object-style lookup
+        // (arrays are objects in JS), falls back to undefined for non-existent keys.
+        current = (current as unknown as Record<string, unknown>)[String(tok)];
+      }
+    } else if (typeof current === 'object') {
+      current = (current as Record<string, unknown>)[String(tok)];
+    } else {
       return undefined;
     }
-    current = (current as Record<string, unknown>)[part];
   }
 
   return current;

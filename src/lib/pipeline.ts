@@ -13,38 +13,73 @@
 import { readFileSync, existsSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { parse as parseYaml } from 'yaml';
+import { ENABLE_AF_27 } from './constants.js';
 
 // --- Constants ---
 
 const PIPELINES_DIR = 'pipelines';
 
+/** Maximum allowed retries on a gate. Soft cap to prevent runaway compute on deterministic failures. */
+export const MAX_GATE_RETRY = 5;
+
 // --- Gate operators ---
 
 export const GATE_OPERATORS = [
-  'eq', 'neq', 'exists', 'not_exists', 'contains', 'gt', 'gte', 'lt', 'lte',
+  'eq', 'neq', 'exists', 'not_exists', 'contains', 'matches',
+  'gt', 'gte', 'lt', 'lte',
 ] as const;
 
 export type GateOperator = (typeof GATE_OPERATORS)[number];
 
 /** Operators that require a `value` field */
 const VALUE_REQUIRED_OPERATORS: readonly GateOperator[] = [
-  'eq', 'neq', 'contains', 'gt', 'gte', 'lt', 'lte',
+  'eq', 'neq', 'contains', 'matches', 'gt', 'gte', 'lt', 'lte',
 ];
 
-/** Operators that must NOT have a `value` field */
-const VALUE_FORBIDDEN_OPERATORS: readonly GateOperator[] = [
-  'exists', 'not_exists',
-];
+/** Operators gated behind ENABLE_AF_27 */
+const AF_27_OPERATORS: readonly GateOperator[] = ['matches'];
 
 // --- Gate definition ---
 
-export interface GateDefinition {
-  /** Dot-path into result.json. E.g., "status", "metadata.pr_url" */
+/**
+ * A single atomic gate condition — one field, one operator, one expected value.
+ */
+export interface GateCondition {
+  /** Dot-path into result.json. E.g., "status", "metadata.pr_url", "artifacts[0].path" */
   field: string;
   /** Comparison operator */
   operator: GateOperator;
-  /** Expected value. Required for eq/neq/contains/gt/gte/lt/lte. Omit for exists/not_exists. */
+  /** Expected value. Required for eq/neq/contains/matches/gt/gte/lt/lte. Omit for exists/not_exists. */
   value?: string | number | boolean;
+}
+
+/**
+ * Gate definition. Backward-compatible superset of AF-26's single-condition shape.
+ *
+ * One-of:
+ *   - Shorthand: top-level { field, operator, value } — same as AF-26
+ *   - Compound:  { all: GateCondition[] }     — all conditions must pass (AND)
+ *   - Compound:  { any: GateCondition[] }     — at least one must pass  (OR)
+ *
+ * Optional: `retry: N` — re-run the phase up to N additional times on gate failure.
+ *
+ * Invalid combinations (rejected by validator):
+ *   - shorthand fields + `all` or `any` in the same spec
+ *   - `all` AND `any` in the same spec (nested groups are a future extension)
+ *   - neither shorthand nor all/any present (empty gate)
+ */
+export interface GateDefinition {
+  // Shorthand (AF-26 compat)
+  field?: string;
+  operator?: GateOperator;
+  value?: string | number | boolean;
+
+  // Compound
+  all?: GateCondition[];
+  any?: GateCondition[];
+
+  // Retry
+  retry?: number;
 }
 
 // --- Artifact injection ---
@@ -99,6 +134,144 @@ export interface PipelineValidationFailure {
 export type PipelineValidationResult =
   | PipelineValidationSuccess
   | PipelineValidationFailure;
+
+// --- Gate validation helpers ---
+
+/**
+ * Validate a single gate condition (field + operator + value).
+ * Pushes any errors onto the supplied accumulator.
+ */
+function validateSingleCondition(
+  raw: unknown,
+  prefix: string,
+  errors: string[],
+): void {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    errors.push(`${prefix}: must be a plain object`);
+    return;
+  }
+  const c = raw as Record<string, unknown>;
+
+  if (typeof c.field !== 'string' || c.field.trim().length === 0) {
+    errors.push(`${prefix}.field: must be a non-empty string`);
+  }
+
+  if (typeof c.operator !== 'string' || !(GATE_OPERATORS as readonly string[]).includes(c.operator)) {
+    errors.push(
+      `${prefix}.operator: invalid operator '${String(c.operator)}' (expected: ${GATE_OPERATORS.join(', ')})`,
+    );
+    return;
+  }
+
+  const op = c.operator as GateOperator;
+
+  // Feature flag gate on AF-27 operators
+  if (!ENABLE_AF_27 && AF_27_OPERATORS.includes(op)) {
+    errors.push(
+      `${prefix}.operator: '${op}' is disabled (ENABLE_AF_27=false)`,
+    );
+    return;
+  }
+
+  if (VALUE_REQUIRED_OPERATORS.includes(op) && c.value === undefined) {
+    errors.push(`${prefix}: operator '${op}' requires a 'value' field`);
+  }
+
+  // For matches, best-effort pre-validate the regex so obvious typos fail fast.
+  if (op === 'matches' && c.value !== undefined) {
+    if (typeof c.value !== 'string') {
+      errors.push(`${prefix}.value: 'matches' requires a string pattern (got ${typeof c.value})`);
+    } else {
+      try {
+        // eslint-disable-next-line no-new
+        new RegExp(c.value);
+      } catch (e: any) {
+        errors.push(`${prefix}.value: invalid regex pattern ${JSON.stringify(c.value)}: ${e?.message ?? String(e)}`);
+      }
+    }
+  }
+}
+
+/**
+ * Validate a gate block — supports the shorthand, compound all/any, and retry shapes.
+ */
+function validateGateBlock(
+  g: Record<string, unknown>,
+  prefix: string,
+  errors: string[],
+): void {
+  const hasShorthand =
+    g.field !== undefined || g.operator !== undefined || g.value !== undefined;
+  const hasAll = g.all !== undefined;
+  const hasAny = g.any !== undefined;
+
+  // Compound forms require AF-27
+  if (!ENABLE_AF_27 && (hasAll || hasAny)) {
+    errors.push(
+      `${prefix}: compound gates ('all'/'any') are disabled (ENABLE_AF_27=false)`,
+    );
+    return;
+  }
+
+  // Exclusivity checks
+  if (hasShorthand && (hasAll || hasAny)) {
+    errors.push(
+      `${prefix}: cannot mix shorthand (field/operator/value) with 'all' or 'any'`,
+    );
+  }
+  if (hasAll && hasAny) {
+    errors.push(
+      `${prefix}: cannot specify both 'all' and 'any' (nested groups are not supported)`,
+    );
+  }
+  if (!hasShorthand && !hasAll && !hasAny) {
+    errors.push(`${prefix}: must specify a condition (shorthand or 'all' or 'any')`);
+  }
+
+  // Shorthand → validate like a single condition
+  if (hasShorthand) {
+    validateSingleCondition(g, prefix, errors);
+  }
+
+  // Compound — each entry must be a valid condition
+  if (hasAll) {
+    if (!Array.isArray(g.all)) {
+      errors.push(`${prefix}.all: must be an array`);
+    } else if (g.all.length === 0) {
+      errors.push(`${prefix}.all: must contain at least one condition`);
+    } else {
+      for (let i = 0; i < g.all.length; i++) {
+        validateSingleCondition(g.all[i], `${prefix}.all[${i}]`, errors);
+      }
+    }
+  }
+  if (hasAny) {
+    if (!Array.isArray(g.any)) {
+      errors.push(`${prefix}.any: must be an array`);
+    } else if (g.any.length === 0) {
+      errors.push(`${prefix}.any: must contain at least one condition`);
+    } else {
+      for (let i = 0; i < g.any.length; i++) {
+        validateSingleCondition(g.any[i], `${prefix}.any[${i}]`, errors);
+      }
+    }
+  }
+
+  // Retry
+  if (g.retry !== undefined) {
+    if (!ENABLE_AF_27) {
+      errors.push(`${prefix}.retry: is disabled (ENABLE_AF_27=false)`);
+    } else if (
+      typeof g.retry !== 'number' ||
+      !Number.isInteger(g.retry) ||
+      g.retry < 0
+    ) {
+      errors.push(`${prefix}.retry: must be a non-negative integer`);
+    } else if (g.retry > MAX_GATE_RETRY) {
+      errors.push(`${prefix}.retry: must be ≤ ${MAX_GATE_RETRY} (found ${g.retry})`);
+    }
+  }
+}
 
 // --- Validation ---
 
@@ -211,23 +384,7 @@ export function validatePipeline(raw: unknown): PipelineValidationResult {
       if (typeof p.gate !== 'object' || p.gate === null || Array.isArray(p.gate)) {
         errors.push(`${gatePrefix}: must be a plain object`);
       } else {
-        const g = p.gate as Record<string, unknown>;
-
-        if (typeof g.field !== 'string' || g.field.trim().length === 0) {
-          errors.push(`${gatePrefix}.field: must be a non-empty string`);
-        }
-
-        if (typeof g.operator !== 'string' || !(GATE_OPERATORS as readonly string[]).includes(g.operator)) {
-          errors.push(
-            `${gatePrefix}.operator: invalid operator '${String(g.operator)}' (expected: ${GATE_OPERATORS.join(', ')})`,
-          );
-        } else {
-          const op = g.operator as GateOperator;
-          if (VALUE_REQUIRED_OPERATORS.includes(op) && g.value === undefined) {
-            errors.push(`${gatePrefix}: operator '${op}' requires a 'value' field`);
-          }
-          // Warn-level: existence operators with value — design says ignore, don't reject
-        }
+        validateGateBlock(p.gate as Record<string, unknown>, gatePrefix, errors);
       }
     }
   }

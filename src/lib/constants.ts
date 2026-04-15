@@ -50,3 +50,8 @@ export const ENABLE_AF_25 = true;
 
 /** AF-26: Pipeline run command. When false, `af pipeline run` refuses to execute. */
 export const ENABLE_AF_26 = true;
+
+/** AF-27: Compound gates, matches operator, retry. When false, the validator rejects
+ *  compound/retry/matches forms and the pipeline runner ignores `retry`. Single-condition
+ *  gates from AF-26 keep working. */
+export const ENABLE_AF_27 = true;

@@ -22,6 +22,7 @@ export type AuditEvent =
   | 'pipeline.phase_start'
   | 'pipeline.phase_complete'
   | 'pipeline.phase_fail'
+  | 'pipeline.phase_retry'
   | 'pipeline.complete'
   | 'pipeline.fail';
 
