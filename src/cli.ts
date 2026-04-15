@@ -21,6 +21,7 @@ import {
 } from './commands/agent.js';
 import { syncCommand } from './commands/sync.js';
 import { webhookServeCommand } from './commands/webhook.js';
+import { pipelineRunCommand, pipelineListCommand } from './commands/pipeline.js';
 
 const program = new Command();
 
@@ -137,6 +138,27 @@ agent
   .description('Check status of background agent spawns')
   .option('-p, --project <prefix>', 'Project prefix')
   .action(agentStatusCommand);
+
+// --- Pipeline commands (AF-26) ---
+
+const pipeline = program
+  .command('pipeline')
+  .description('Pipeline management');
+
+pipeline
+  .command('run <name>')
+  .description('Run a pipeline end-to-end on a task')
+  .requiredOption('--task <ticket>', 'Task ticket to run the pipeline against')
+  .option('-p, --project <prefix>', 'Project prefix')
+  .option('--dry-run', 'Print execution plan without spawning agents')
+  .option('--from <phase>', 'Resume from a specific phase')
+  .action(pipelineRunCommand);
+
+pipeline
+  .command('list')
+  .description('List available pipeline definitions')
+  .option('-p, --project <prefix>', 'Project prefix')
+  .action(pipelineListCommand);
 
 // --- Sync command (AF-12) ---
 
