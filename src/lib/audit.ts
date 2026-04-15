@@ -17,7 +17,13 @@ export type AuditEvent =
   | 'sync.complete'
   | 'sync.error'
   | 'webhook.receive'
-  | 'webhook.error';
+  | 'webhook.error'
+  | 'pipeline.start'
+  | 'pipeline.phase_start'
+  | 'pipeline.phase_complete'
+  | 'pipeline.phase_fail'
+  | 'pipeline.complete'
+  | 'pipeline.fail';
 
 export interface AuditEntry {
   timestamp: string;        // ISO 8601

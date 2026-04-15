@@ -11,7 +11,7 @@ import { heading, success, error, dim } from '../lib/format.js';
 import { auditLog } from '../lib/audit.js';
 import { postActivityToLoka } from '../lib/audit-bridge.js';
 
-interface AgentMeta {
+export interface AgentMeta {
   slug: string;
   name: string;
   role?: string;
@@ -25,13 +25,13 @@ interface AgentMeta {
   [key: string]: unknown;
 }
 
-interface AgentFile {
+export interface AgentFile {
   meta: AgentMeta;
   content: string;
   filePath: string;
 }
 
-function loadAgent(slug: string): AgentFile | null {
+export function loadAgent(slug: string): AgentFile | null {
   const filePath = join(AGENTS_DIR, `${slug}.md`);
   if (!existsSync(filePath)) return null;
   const raw = readFileSync(filePath, 'utf-8');

@@ -47,3 +47,6 @@ export const ENABLE_AF_23 = true;
 
 /** AF-25: Artifact injection. When false, pipeline runner skips inject resolution. */
 export const ENABLE_AF_25 = true;
+
+/** AF-26: Pipeline run command. When false, `af pipeline run` refuses to execute. */
+export const ENABLE_AF_26 = true;
