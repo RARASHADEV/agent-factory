@@ -58,3 +58,8 @@ export const ENABLE_AF_27 = true;
 
 /** AF-28: Pipeline status command. When false, `af pipeline status` refuses to execute. */
 export const ENABLE_AF_28 = true;
+
+/** AF-34: Pause/resume for pipelines. When false, both commands refuse and
+ *  the runner's between-phase sentinel check is skipped — existing run behavior
+ *  is unaffected. */
+export const ENABLE_AF_34 = true;
