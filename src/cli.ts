@@ -25,6 +25,8 @@ import {
   pipelineRunCommand,
   pipelineListCommand,
   pipelineStatusCommand,
+  pipelinePauseCommand,
+  pipelineResumeCommand,
 } from './commands/pipeline.js';
 
 const program = new Command();
@@ -170,6 +172,20 @@ pipeline
   .option('-p, --project <prefix>', 'Project prefix')
   .option('--json', 'Emit raw JSON')
   .action(pipelineStatusCommand);
+
+// --- Pipeline pause/resume commands (AF-34) ---
+
+pipeline
+  .command('pause <ticket>')
+  .description('Pause a running pipeline at the next phase boundary')
+  .option('-p, --project <prefix>', 'Project prefix')
+  .action(pipelinePauseCommand);
+
+pipeline
+  .command('resume <ticket>')
+  .description('Resume a paused pipeline from the next pending phase')
+  .option('-p, --project <prefix>', 'Project prefix')
+  .action(pipelineResumeCommand);
 
 // --- Sync command (AF-12) ---
 

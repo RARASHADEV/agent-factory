@@ -4,16 +4,19 @@
  * State lives at `.af/output/<ticket>/pipeline-state.json` and is written
  * continuously as the pipeline progresses. AF-28 reads this format.
  *
+ * AF-34 adds `'paused'` to PipelineStatus, `pausedAt`/`resumedAt` fields
+ * on PipelineState, and the pause-request sentinel file I/O helpers.
+ *
  * This file is pure I/O + typed state transitions. No business logic.
  */
 
-import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'fs';
+import { writeFileSync, readFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from 'fs';
 import { join, dirname } from 'path';
 import type { PhaseDefinition } from './pipeline.js';
 
 // --- Status enums ---
 
-export type PipelineStatus = 'running' | 'completed' | 'failed';
+export type PipelineStatus = 'running' | 'completed' | 'failed' | 'paused';
 export type PhaseStatus =
   | 'pending'
   | 'running'
@@ -82,6 +85,16 @@ export interface PipelineState {
   status: PipelineStatus;
   startedAt: string;
   completedAt?: string;
+  /**
+   * AF-34: ISO timestamp of the most recent pause transition. Overwritten on
+   * each pause cycle — full history lives in audit.log.
+   */
+  pausedAt?: string;
+  /**
+   * AF-34: ISO timestamp of the most recent resume transition. Overwritten on
+   * each resume — full history lives in audit.log.
+   */
+  resumedAt?: string;
   /** Only set while status === 'running' */
   currentPhase?: string;
   /** Phase name → phase state */
@@ -151,4 +164,115 @@ export function initPipelineState(
     startedAt: new Date().toISOString(),
     phases: phaseMap,
   };
+}
+
+// ============================================================
+// AF-34: Pause-request sentinel I/O
+// ============================================================
+
+/**
+ * AF-34: A pause request sentinel — one is written to
+ * `<outputDir>/pause.request` by `af pipeline pause <ticket>` and observed
+ * by the runner between phases. Contents are forensic only; the runner
+ * cares solely about the file's existence.
+ */
+export interface PauseRequest {
+  /** ISO 8601 timestamp when the pause was requested. */
+  requestedAt: string;
+  /** Who requested it. 'cli' for now; future: 'webhook', etc. */
+  requestedBy: string;
+}
+
+const PAUSE_FILENAME = 'pause.request';
+
+/**
+ * AF-34: Write a pause-request sentinel to `<outputDir>/pause.request`.
+ *
+ * Atomic: writes to `<outputDir>/pause.request.tmp` and renames into place.
+ * This prevents the runner from observing a half-written file if the pause
+ * command's process is killed mid-write.
+ *
+ * Throws if the output directory does not exist — the caller is expected
+ * to have checked for a pipeline run before requesting pause.
+ */
+export function writePauseRequest(
+  outputDir: string,
+  req: PauseRequest,
+): void {
+  if (!existsSync(outputDir)) {
+    throw new Error(`Output dir does not exist: ${outputDir}`);
+  }
+  const tmp = join(outputDir, `${PAUSE_FILENAME}.tmp`);
+  const final = join(outputDir, PAUSE_FILENAME);
+  writeFileSync(tmp, JSON.stringify(req, null, 2), 'utf-8');
+  renameSync(tmp, final);
+}
+
+/**
+ * AF-34: Return true if a pause request sentinel is present.
+ * Hot-path helper for the runner's between-phase check — existence-only,
+ * no I/O on the contents.
+ */
+export function pauseRequestExists(outputDir: string): boolean {
+  return existsSync(join(outputDir, PAUSE_FILENAME));
+}
+
+/**
+ * AF-34: Read the pause-request sentinel. Returns null if absent or malformed.
+ * Used for forensics (e.g. when transitioning to paused, the runner records
+ * the original `requestedAt`/`requestedBy` in the audit log).
+ */
+export function readPauseRequest(outputDir: string): PauseRequest | null {
+  const filePath = join(outputDir, PAUSE_FILENAME);
+  if (!existsSync(filePath)) return null;
+  try {
+    const raw = readFileSync(filePath, 'utf-8');
+    return JSON.parse(raw) as PauseRequest;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * AF-34: Remove the pause-request sentinel. Idempotent — no-op if the
+ * file does not exist. Called by `af pipeline resume` as the authoritative
+ * clearer; the runner never removes it so a crash mid-pause is recoverable.
+ */
+export function removePauseRequest(outputDir: string): void {
+  const filePath = join(outputDir, PAUSE_FILENAME);
+  if (!existsSync(filePath)) return;
+  try {
+    unlinkSync(filePath);
+  } catch {
+    // Best effort — a parallel removal or permissions blip is not fatal.
+  }
+}
+
+// ============================================================
+// AF-34: Resume — find the next phase to run
+// ============================================================
+
+/**
+ * AF-34: Return the index of the first phase in `phaseOrder` whose recorded
+ * status is neither `completed` nor `skipped`. Returns `phaseOrder.length`
+ * when every phase is done.
+ *
+ * Defensive: if a phase has no state record (shouldn't happen with well-
+ * formed state files, but could after a manual edit), returns that index
+ * so the runner re-runs it.
+ *
+ * Pure function — no I/O.
+ */
+export function findNextPendingPhase(
+  state: PipelineState,
+  phaseOrder: PhaseDefinition[],
+): number {
+  for (let i = 0; i < phaseOrder.length; i++) {
+    const ps = state.phases[phaseOrder[i].name];
+    if (!ps) return i;
+    if (ps.status === 'completed') continue;
+    if (ps.status === 'skipped') continue;
+    return i;
+  }
+  return phaseOrder.length;
 }
