@@ -1504,6 +1504,7 @@ export function renderPipelineState(
 
   // Header
   let statusLine: string;
+  let pausedLine: string | undefined;
   if (state.status === 'running') {
     const started = Date.parse(state.startedAt);
     const elapsed = Number.isNaN(started) ? undefined : now - started;
@@ -1518,6 +1519,17 @@ export function renderPipelineState(
         : undefined;
     const el = total !== undefined ? ` (${formatDuration(total)})` : '';
     statusLine = `Status: ${chalk.green('completed')}${el}`;
+  } else if (state.status === 'paused') {
+    // AF-34: paused state — show elapsed-since-start and a resume hint.
+    const started = Date.parse(state.startedAt);
+    const elapsed = Number.isNaN(started) ? undefined : now - started;
+    const el = elapsed !== undefined ? ` (${formatDuration(elapsed)} elapsed)` : '';
+    statusLine = `Status: ${chalk.yellow('paused')}${el}`;
+    if (state.pausedAt) {
+      pausedLine = dim(
+        `Paused at: ${state.pausedAt}  — resume with \`af pipeline resume ${state.ticket}\``,
+      );
+    }
   } else {
     // failed
     const started = Date.parse(state.startedAt);
@@ -1532,6 +1544,7 @@ export function renderPipelineState(
 
   lines.push(heading(`Pipeline: ${state.pipeline} — ${state.ticket}`));
   lines.push(statusLine);
+  if (pausedLine) lines.push(pausedLine);
   lines.push('');
 
   // Phase rows
@@ -1591,7 +1604,9 @@ export function renderRunList(
         ? '🔄'
         : state.status === 'completed'
           ? '✅'
-          : '❌';
+          : state.status === 'paused'
+            ? '⏸️'
+            : '❌';
 
     const started = Date.parse(state.startedAt);
     const startedStr = Number.isNaN(started)
@@ -1636,6 +1651,20 @@ export function renderRunList(
       ).length;
       const totalCount = phaseValues.length;
       trailing = `${dim(total.padEnd(10))}  ${completedCount}/${totalCount} phases passed`;
+    } else if (state.status === 'paused') {
+      // AF-34: show elapsed-since-start and the phase we're paused before.
+      const elapsed = !Number.isNaN(started)
+        ? formatDuration(now - started)
+        : '—';
+      // First phase with a non-terminal status is the one we'll resume into.
+      let nextPending: string | undefined;
+      for (const [name, ps] of Object.entries(state.phases)) {
+        if (ps.status !== 'completed' && ps.status !== 'skipped') {
+          nextPending = name;
+          break;
+        }
+      }
+      trailing = `${dim(elapsed.padEnd(10))}  paused before: ${nextPending ?? '—'}`;
     } else {
       // failed
       const total = totalMs !== undefined ? formatDuration(totalMs) : '—';
@@ -1672,7 +1701,9 @@ export function renderRunList(
         ? chalk.cyan('running  ')
         : state.status === 'completed'
           ? chalk.green('completed')
-          : chalk.red('failed   ');
+          : state.status === 'paused'
+            ? chalk.yellow('paused   ')
+            : chalk.red('failed   ');
 
     lines.push(
       `  ${icon}  ${chalk.bold(state.ticket.padEnd(8))} ${dim(state.pipeline.padEnd(10))} ${statusWord}  ${trailing}`,

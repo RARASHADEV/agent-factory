@@ -132,6 +132,27 @@ function failedState(): PipelineState {
   };
 }
 
+function pausedState(): PipelineState {
+  // AF-34: design ✅, implement pending, verify pending. Paused before implement.
+  return {
+    pipeline: 'sdlc',
+    ticket: 'AF-33',
+    status: 'paused',
+    startedAt: '2026-04-15T12:00:00.000Z',
+    pausedAt: '2026-04-15T12:03:12.000Z',
+    phases: {
+      design: {
+        agent: 'architect',
+        status: 'completed',
+        durationMs: 192000,
+        gateResult: 'pass',
+      },
+      implement: { agent: 'engineer', status: 'pending' },
+      verify: { agent: 'qa', status: 'pending' },
+    },
+  };
+}
+
 function runningState(startedAt: string, nowPhaseStart: string): PipelineState {
   return {
     pipeline: 'sdlc',
@@ -213,6 +234,27 @@ describe('renderPipelineState', () => {
     assert.match(out, /Warnings:/);
     assert.match(out, /no files matched/);
   });
+
+  // AF-34: paused-state rendering
+  it('renders paused state with yellow status + resume hint', () => {
+    const out = renderPipelineState(
+      pausedState(),
+      AF_PATH,
+      Date.parse('2026-04-15T12:03:12.000Z'),
+    ).join('\n');
+    assert.match(out, /Pipeline: sdlc — AF-33/);
+    assert.match(out, /Status: paused/);
+    assert.match(out, /Paused at: 2026-04-15T12:03:12\.000Z/);
+    assert.match(out, /af pipeline resume AF-33/);
+    // Completed phase still shown
+    assert.match(out, /design/);
+    assert.match(out, /gate: pass/);
+    // Pending phases shown
+    assert.match(out, /implement/);
+    assert.match(out, /verify/);
+    // Elapsed duration (12m 3s... actually 3m 12s since start)
+    assert.match(out, /3m 12s elapsed/);
+  });
 });
 
 // ============================================================
@@ -260,6 +302,30 @@ describe('renderRunList', () => {
     assert.match(out, /failed/);
     assert.match(out, /phase: implement/);
     assert.match(out, /gate failed/);
+  });
+
+  // AF-34: paused rendering in list mode
+  it('shows paused status with next-pending phase for paused runs', () => {
+    const out = renderRunList(
+      [pausedState()],
+      Date.parse('2026-04-15T12:03:12.000Z'),
+    ).join('\n');
+    assert.match(out, /AF-33/);
+    assert.match(out, /paused/);
+    assert.match(out, /paused before: implement/);
+    // Elapsed duration should be shown (3m 12s from startedAt to now)
+    assert.match(out, /3m 12s/);
+  });
+
+  it('uses the pause icon for paused runs and does not fall through to failed', () => {
+    // Deliberately give the run no failed phase — if the icon ternary fell
+    // through to '❌' this would erroneously pass, so we assert explicitly.
+    const out = renderRunList(
+      [pausedState()],
+      Date.parse('2026-04-15T12:03:12.000Z'),
+    ).join('\n');
+    assert.match(out, /⏸/); // pause icon in some form
+    assert.doesNotMatch(out, /❌/);
   });
 });
 
