@@ -306,7 +306,88 @@ export async function pipelineRunCommand(
   const ctx = buildInjectionContext(pipeline, task.ticket, afPath, projectDir);
   const allWarnings: string[] = [];
 
-  // 10. Phase loop
+  // 10. Phase loop — extracted into sharedPhaseLoop so resume (AF-34) can reuse it.
+  const loopOutcome = await sharedPhaseLoop({
+    pipeline,
+    phaseOrder,
+    startIndex,
+    state,
+    task,
+    afPath,
+    projectDir,
+    pipelineOutputDir,
+    ctx,
+    allWarnings,
+    pipelineStart,
+    name,
+  });
+
+  if (loopOutcome === 'failed') {
+    process.exit(1);
+  }
+  // 'completed' — fall through to return
+}
+
+// ============================================================
+// sharedPhaseLoop — the per-phase execution engine
+// ============================================================
+
+/**
+ * Outcome of the shared phase loop.
+ *
+ * - 'completed' — all remaining phases from startIndex ran to success; state persisted
+ *   as `completed`, success summary printed.
+ * - 'failed'    — a phase failed; state persisted as `failed`, failure summary printed.
+ *   Caller decides whether to `process.exit(1)`.
+ * - 'paused'    — (AF-34) a pause.request sentinel was observed between phases; state
+ *   persisted as `paused`, resume message printed. Caller exits 0.
+ */
+export type PhaseLoopOutcome = 'completed' | 'failed' | 'paused';
+
+export interface PhaseLoopArgs {
+  pipeline: PipelineDefinition;
+  phaseOrder: PhaseDefinition[];
+  startIndex: number;
+  /** Live state — mutated + persisted as the loop runs. */
+  state: PipelineState;
+  task: Task;
+  afPath: string;
+  projectDir: string;
+  pipelineOutputDir: string;
+  ctx: InjectionContext;
+  /** Accumulated injection warnings — appended to as phases run. */
+  allWarnings: string[];
+  /** Epoch ms — used for total pipeline duration reporting. */
+  pipelineStart: number;
+  /** Pipeline name (for logging + audit). */
+  name: string;
+}
+
+/**
+ * The per-phase execution engine shared by `pipeline run` and `pipeline resume`.
+ *
+ * Mechanical extraction from `pipelineRunCommand` (AF-34 commit 1) — behavior
+ * preserved exactly. Returns an outcome tag so callers can decide the exit code
+ * rather than calling `process.exit` from inside the loop.
+ */
+export async function sharedPhaseLoop(
+  args: PhaseLoopArgs,
+): Promise<PhaseLoopOutcome> {
+  const {
+    phaseOrder,
+    startIndex,
+    state,
+    task,
+    afPath,
+    projectDir,
+    pipelineOutputDir,
+    ctx,
+    allWarnings,
+    pipelineStart,
+    name,
+  } = args;
+
+  // Phase loop
   for (let i = startIndex; i < phaseOrder.length; i++) {
     const phase = phaseOrder[i];
     const phaseStart = Date.now();
@@ -350,7 +431,7 @@ export async function pipelineRunCommand(
       finalizePhaseFailure(state, phase, phaseStart, 'spawn_error', msg, pipelineOutputDir, afPath, task.ticket);
       finalizePipelineFailure(state, name, phase.name, pipelineOutputDir, afPath, task.ticket, allWarnings, pipelineStart);
       printFailureSummary(state, phase.name, task.ticket, name, pipelineOutputDir);
-      process.exit(1);
+      return 'failed';
     }
 
     // 10c. Spawn + evaluate gate — with optional retry (AF-27)
@@ -475,7 +556,7 @@ export async function pipelineRunCommand(
 
       finalizePipelineFailure(state, name, phase.name, pipelineOutputDir, afPath, task.ticket, allWarnings, pipelineStart);
       printFailureSummary(state, phase.name, task.ticket, name, pipelineOutputDir);
-      process.exit(1);
+      return 'failed';
     }
 
     const attemptsSuffix = attempts > 1 ? dim(` (attempts: ${attempts})`) : '';
@@ -517,6 +598,7 @@ export async function pipelineRunCommand(
   });
 
   printSuccessSummary(state, name, pipelineOutputDir, pipelineStart);
+  return 'completed';
 }
 
 // ============================================================
