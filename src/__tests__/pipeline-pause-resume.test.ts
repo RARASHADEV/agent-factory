@@ -39,7 +39,7 @@ import {
   sharedPhaseLoop,
   type PhaseLoopArgs,
 } from '../commands/pipeline.js';
-import type { Task } from '../lib/task-provider.js';
+import type { Task, TaskProvider } from '../lib/task-provider.js';
 
 // Deterministic output — no ANSI colors in assertions.
 chalk.level = 0;
@@ -587,6 +587,20 @@ describe('sharedPhaseLoop — between-phase pause observation', () => {
     };
   }
 
+  // AF-38: stub provider — only .get is invoked by sharedPhaseLoop for re-fetch.
+  // These two pause-short-circuit tests never reach the re-fetch path, so
+  // returning null is harmless (loop keeps its existing task handle).
+  function mkProvider(): TaskProvider {
+    return {
+      list: async () => [],
+      get: async () => null,
+      create: async () => { throw new Error('not implemented in stub'); },
+      move: async () => { throw new Error('not implemented in stub'); },
+      update: async () => { throw new Error('not implemented in stub'); },
+      delete: async () => { throw new Error('not implemented in stub'); },
+    } as unknown as TaskProvider;
+  }
+
   it('observes a pre-placed sentinel and returns "paused" without running any phase', async () => {
     const pipelineOutputDir = join(AF_PATH, 'output', 'AF-30');
     mkdirSync(pipelineOutputDir, { recursive: true });
@@ -618,6 +632,7 @@ describe('sharedPhaseLoop — between-phase pause observation', () => {
       allWarnings: [],
       pipelineStart: Date.now(),
       name: 'sdlc',
+      provider: mkProvider(),
     };
 
     const outcome = await sharedPhaseLoop(loopArgs);
@@ -675,6 +690,7 @@ describe('sharedPhaseLoop — between-phase pause observation', () => {
       allWarnings: [],
       pipelineStart: Date.now(),
       name: 'sdlc',
+      provider: mkProvider(),
     };
 
     const outcome = await sharedPhaseLoop(loopArgs);

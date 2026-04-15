@@ -36,7 +36,7 @@ import {
 import { loadConfig } from '../lib/config.js';
 import { resolveProject } from '../lib/workspace.js';
 import { createProvider } from '../lib/provider-factory.js';
-import type { Task } from '../lib/task-provider.js';
+import type { Task, TaskProvider } from '../lib/task-provider.js';
 import {
   loadPipeline,
   listPipelines,
@@ -345,6 +345,7 @@ export async function pipelineRunCommand(
     allWarnings,
     pipelineStart,
     name,
+    provider,
   });
 
   if (loopOutcome === 'failed') {
@@ -386,6 +387,13 @@ export interface PhaseLoopArgs {
   pipelineStart: number;
   /** Pipeline name (for logging + audit). */
   name: string;
+  /**
+   * Task provider — used to re-fetch the task between phases so that
+   * `task.filePath` stays current when an agent moves the task file during
+   * its phase (e.g. engineer moving from in-progress/ → ready-for-qa/).
+   * See AF-38.
+   */
+  provider: TaskProvider;
 }
 
 /**
@@ -402,7 +410,6 @@ export async function sharedPhaseLoop(
     phaseOrder,
     startIndex,
     state,
-    task,
     afPath,
     projectDir,
     pipelineOutputDir,
@@ -410,7 +417,11 @@ export async function sharedPhaseLoop(
     allWarnings,
     pipelineStart,
     name,
+    provider,
   } = args;
+  // AF-38: task is reassigned between phases (via provider.get) so agents can
+  // move the task file during their phase without stale-path failures downstream.
+  let task: Task = args.task;
 
   // Phase loop
   for (let i = startIndex; i < phaseOrder.length; i++) {
@@ -446,6 +457,18 @@ export async function sharedPhaseLoop(
       console.log(warn(`Pause requested — stopping before phase "${phase.name}"`));
       console.log(dim(`    Resume with: af pipeline resume ${task.ticket}`));
       return 'paused';
+    }
+
+    // AF-38: re-fetch the task before each phase so task.filePath stays current
+    // if a prior phase's agent moved the task file (e.g. engineer moving to
+    // ready-for-qa/). Tolerant of transient failures — keep prior handle.
+    try {
+      const refreshed = await provider.get(task.ticket);
+      if (refreshed) {
+        task = refreshed;
+      }
+    } catch {
+      // Non-fatal: the outer composePrompt will surface a clearer error if needed.
     }
 
     const phaseStart = Date.now();
@@ -906,6 +929,7 @@ export async function pipelineResumeCommand(
     allWarnings,
     pipelineStart,
     name: state.pipeline,
+    provider,
   });
 
   if (outcome === 'failed') {
