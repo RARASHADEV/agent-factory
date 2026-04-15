@@ -55,3 +55,6 @@ export const ENABLE_AF_26 = true;
  *  compound/retry/matches forms and the pipeline runner ignores `retry`. Single-condition
  *  gates from AF-26 keep working. */
 export const ENABLE_AF_27 = true;
+
+/** AF-28: Pipeline status command. When false, `af pipeline status` refuses to execute. */
+export const ENABLE_AF_28 = true;
