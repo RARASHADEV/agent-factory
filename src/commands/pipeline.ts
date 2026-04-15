@@ -254,7 +254,7 @@ export async function pipelineRunCommand(
   // 3. Resolve task
   const provider = createProvider(afPath, meta);
   const ticket = options.task.toUpperCase();
-  const task = await provider.get(ticket);
+  let task = await provider.get(ticket);
   if (!task) {
     console.log(error(`Task ${options.task} not found.`));
     process.exit(1);
@@ -293,9 +293,16 @@ export async function pipelineRunCommand(
   writePipelineState(pipelineOutputDir, state);
 
   // 7. Task → in-progress (best effort)
+  //    After the move, re-fetch the task so that task.filePath reflects the new
+  //    location on disk. Otherwise the prompt composer reads a stale path and
+  //    fails with ENOENT. See AF-35.
   try {
     if (task.status !== 'in-progress') {
       await provider.move(task.ticket, 'in-progress');
+      const refreshed = await provider.get(task.ticket);
+      if (refreshed) {
+        task = refreshed;
+      }
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
