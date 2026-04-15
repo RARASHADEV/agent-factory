@@ -27,7 +27,12 @@ import { join, relative } from 'path';
 import { spawn } from 'child_process';
 import chalk from 'chalk';
 
-import { ENABLE_AF_26, ENABLE_AF_27, ENABLE_AF_28 } from '../lib/constants.js';
+import {
+  ENABLE_AF_26,
+  ENABLE_AF_27,
+  ENABLE_AF_28,
+  ENABLE_AF_34,
+} from '../lib/constants.js';
 import { loadConfig } from '../lib/config.js';
 import { resolveProject } from '../lib/workspace.js';
 import { createProvider } from '../lib/provider-factory.js';
@@ -59,6 +64,11 @@ import {
   writePipelineState,
   readPipelineState,
   initPipelineState,
+  writePauseRequest,
+  pauseRequestExists,
+  readPauseRequest,
+  removePauseRequest,
+  findNextPendingPhase,
   type PipelineState,
   type PhaseState,
   type PhaseStatus,
@@ -85,6 +95,14 @@ export interface PipelineListOptions {
 export interface PipelineStatusOptions {
   project?: string;
   json?: boolean;
+}
+
+export interface PipelinePauseOptions {
+  project?: string;
+}
+
+export interface PipelineResumeOptions {
+  project?: string;
 }
 
 // ============================================================
@@ -390,6 +408,39 @@ export async function sharedPhaseLoop(
   // Phase loop
   for (let i = startIndex; i < phaseOrder.length; i++) {
     const phase = phaseOrder[i];
+
+    // AF-34: cooperative between-phase pause check.
+    // If a pause request sentinel is present, transition to 'paused' before
+    // starting phase[i], persist state, audit, and return — caller exits 0.
+    // Sentinel is NOT deleted here; only `resume` removes it. This keeps
+    // pause durable across crashes.
+    if (ENABLE_AF_34 && pauseRequestExists(pipelineOutputDir)) {
+      const pauseReq = readPauseRequest(pipelineOutputDir);
+      state.status = 'paused';
+      state.pausedAt = new Date().toISOString();
+      state.currentPhase = undefined;
+      if (allWarnings.length > 0) state.warnings = allWarnings;
+      writePipelineState(pipelineOutputDir, state);
+
+      auditLog(afPath, {
+        event: 'pipeline.pause',
+        ticket: task.ticket,
+        actor: 'cli',
+        detail: `Pipeline ${name} paused before phase ${phase.name}`,
+        meta: {
+          pipeline: name,
+          pausedBeforePhase: phase.name,
+          requestedAt: pauseReq?.requestedAt,
+          requestedBy: pauseReq?.requestedBy,
+        },
+      });
+
+      console.log('');
+      console.log(warn(`Pause requested — stopping before phase "${phase.name}"`));
+      console.log(dim(`    Resume with: af pipeline resume ${task.ticket}`));
+      return 'paused';
+    }
+
     const phaseStart = Date.now();
 
     state.currentPhase = phase.name;
@@ -599,6 +650,261 @@ export async function sharedPhaseLoop(
 
   printSuccessSummary(state, name, pipelineOutputDir, pipelineStart);
   return 'completed';
+}
+
+// ============================================================
+// AF-34: pipelinePauseCommand
+// ============================================================
+
+/**
+ * `af pipeline pause <ticket>` — request a pause. The runner observes the
+ * sentinel on its next between-phase check and exits cleanly. Mid-phase
+ * pause is not supported in v1; the currently-running agent subprocess
+ * is never interrupted.
+ */
+export async function pipelinePauseCommand(
+  ticket: string,
+  options: PipelinePauseOptions,
+): Promise<void> {
+  if (!ENABLE_AF_34) {
+    console.log(error('Pipeline pause/resume is disabled (ENABLE_AF_34=false).'));
+    process.exit(1);
+  }
+
+  const resolved = resolveProject(options.project);
+  if (!resolved) {
+    console.log(error('No project found. Run from a project dir or use --project <prefix>.'));
+    process.exit(1);
+  }
+  const { afPath } = resolved;
+
+  const normalized = ticket.toUpperCase();
+  const pipelineOutputDir = join(afPath, 'output', normalized);
+
+  const state = readPipelineState(pipelineOutputDir);
+  if (!state) {
+    console.log(error(`No pipeline run found for ${normalized}.`));
+    process.exit(1);
+  }
+
+  // Refuse if the pipeline is already in a terminal or already-paused state.
+  if (state.status === 'completed') {
+    console.log(error(`Pipeline ${state.pipeline} for ${normalized} is already completed.`));
+    process.exit(1);
+  }
+  if (state.status === 'failed') {
+    console.log(error(`Pipeline ${state.pipeline} for ${normalized} has already failed.`));
+    process.exit(1);
+  }
+  if (state.status === 'paused') {
+    console.log(error(`Pipeline ${state.pipeline} for ${normalized} is already paused.`));
+    process.exit(1);
+  }
+
+  // state.status === 'running' — write the sentinel.
+  const requestedAt = new Date().toISOString();
+  writePauseRequest(pipelineOutputDir, {
+    requestedAt,
+    requestedBy: 'cli',
+  });
+
+  auditLog(afPath, {
+    event: 'pipeline.pause',
+    ticket: normalized,
+    actor: 'cli',
+    detail: `Pause requested for pipeline ${state.pipeline}`,
+    meta: {
+      pipeline: state.pipeline,
+      requestedAt,
+      requestedBy: 'cli',
+    },
+  });
+
+  console.log(warn(`Pause requested for ${normalized}. Runner will stop at the next phase boundary.`));
+  console.log(dim(`    State: ${join(pipelineOutputDir, 'pipeline-state.json')}`));
+}
+
+// ============================================================
+// AF-34: pipelineResumeCommand
+// ============================================================
+
+/**
+ * `af pipeline resume <ticket>` — continue a paused pipeline from the first
+ * non-terminal phase. Durable: works even if the original runner process
+ * exited after the pause was observed.
+ *
+ * Refuses to resume if:
+ *   - no state file,
+ *   - state is not `paused`,
+ *   - the pipeline YAML has been edited in a structurally-incompatible way
+ *     (phase name set differs from the saved state).
+ *
+ * Delegates to `sharedPhaseLoop`, the same engine used by `pipeline run`.
+ */
+export async function pipelineResumeCommand(
+  ticket: string,
+  options: PipelineResumeOptions,
+): Promise<void> {
+  if (!ENABLE_AF_34) {
+    console.log(error('Pipeline pause/resume is disabled (ENABLE_AF_34=false).'));
+    process.exit(1);
+  }
+
+  const resolved = resolveProject(options.project);
+  if (!resolved) {
+    console.log(error('No project found. Run from a project dir or use --project <prefix>.'));
+    process.exit(1);
+  }
+  const { afPath, meta } = resolved;
+  const projectDir = join(afPath, '..');
+
+  const normalized = ticket.toUpperCase();
+  const pipelineOutputDir = join(afPath, 'output', normalized);
+
+  const state = readPipelineState(pipelineOutputDir);
+  if (!state) {
+    console.log(error(`No pipeline run found for ${normalized}.`));
+    process.exit(1);
+  }
+
+  if (state.status === 'completed') {
+    console.log(
+      error(
+        `Pipeline ${state.pipeline} for ${normalized} is already completed — nothing to resume.`,
+      ),
+    );
+    process.exit(1);
+  }
+  if (state.status === 'failed') {
+    console.log(
+      error(
+        `Pipeline ${state.pipeline} for ${normalized} failed. Use \`af pipeline run ${state.pipeline} --task ${normalized} --from <phase>\` to re-run from a specific phase.`,
+      ),
+    );
+    process.exit(1);
+  }
+  if (state.status === 'running') {
+    console.log(
+      error(
+        `Pipeline ${state.pipeline} for ${normalized} is marked running. If a previous run crashed, use \`af pipeline run ${state.pipeline} --task ${normalized} --from <phase>\` to recover.`,
+      ),
+    );
+    process.exit(1);
+  }
+  // state.status === 'paused'
+
+  // Load the pipeline definition. If the YAML is gone or malformed, bail.
+  let pipeline: PipelineDefinition;
+  try {
+    pipeline = loadPipeline(afPath, state.pipeline);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.log(error(`Could not load pipeline definition "${state.pipeline}": ${msg}`));
+    process.exit(1);
+  }
+
+  const phaseOrder = resolvePhaseOrder(pipeline);
+
+  // Safety check: refuse if the pipeline definition's phase set has changed
+  // since the pause. Order/gate/injection differences within a phase are OK —
+  // completed phases' artifacts are already on disk.
+  const savedPhaseNames = new Set(Object.keys(state.phases));
+  const currentPhaseNames = new Set(phaseOrder.map((p) => p.name));
+  if (
+    savedPhaseNames.size !== currentPhaseNames.size ||
+    [...savedPhaseNames].some((n) => !currentPhaseNames.has(n))
+  ) {
+    console.log(
+      error(
+        `Pipeline definition has changed since pause. Cannot resume. ` +
+          `Use \`af pipeline run ${state.pipeline} --task ${normalized} --from <phase>\` if you intend to proceed with the new definition.`,
+      ),
+    );
+    process.exit(1);
+  }
+
+  const startIndex = findNextPendingPhase(state, phaseOrder);
+
+  // Degenerate case: nothing left to run. Flip the status to completed and exit.
+  if (startIndex >= phaseOrder.length) {
+    state.status = 'completed';
+    state.completedAt = new Date().toISOString();
+    writePipelineState(pipelineOutputDir, state);
+    removePauseRequest(pipelineOutputDir);
+    console.log(
+      success(
+        `Pipeline ${state.pipeline} already complete for ${normalized} — no phases pending.`,
+      ),
+    );
+    return;
+  }
+
+  // Resolve the task — needed for prompt composition.
+  const provider = createProvider(afPath, meta);
+  const task = await provider.get(normalized);
+  if (!task) {
+    console.log(error(`Task ${normalized} not found.`));
+    process.exit(1);
+  }
+
+  // Clear the sentinel, flip state back to running, record resumedAt.
+  removePauseRequest(pipelineOutputDir);
+  state.status = 'running';
+  state.resumedAt = new Date().toISOString();
+  writePipelineState(pipelineOutputDir, state);
+
+  auditLog(afPath, {
+    event: 'pipeline.resume',
+    ticket: normalized,
+    actor: 'cli',
+    detail: `Pipeline ${state.pipeline} resumed from phase ${phaseOrder[startIndex].name}`,
+    meta: {
+      pipeline: state.pipeline,
+      fromPhase: phaseOrder[startIndex].name,
+    },
+  });
+
+  console.log(heading(`Resuming pipeline ${state.pipeline} — ${normalized} from phase "${phaseOrder[startIndex].name}"`));
+  const priorDone = phaseOrder
+    .slice(0, startIndex)
+    .filter((p) => {
+      const ps = state.phases[p.name];
+      return ps && (ps.status === 'completed' || ps.status === 'skipped');
+    })
+    .map((p) => {
+      const ps = state.phases[p.name];
+      return `${p.name} (${ps.status === 'completed' ? '✅' : '⏭️'})`;
+    });
+  if (priorDone.length > 0) {
+    console.log(dim(`  Prior phases: ${priorDone.join(', ')}`));
+  }
+  console.log('');
+
+  // Rebuild runtime context — same as `run`.
+  const ctx = buildInjectionContext(pipeline, normalized, afPath, projectDir);
+  const allWarnings: string[] = state.warnings ? [...state.warnings] : [];
+  const parsedStart = Date.parse(state.startedAt);
+  const pipelineStart = Number.isNaN(parsedStart) ? Date.now() : parsedStart;
+
+  const outcome = await sharedPhaseLoop({
+    pipeline,
+    phaseOrder,
+    startIndex,
+    state,
+    task,
+    afPath,
+    projectDir,
+    pipelineOutputDir,
+    ctx,
+    allWarnings,
+    pipelineStart,
+    name: state.pipeline,
+  });
+
+  if (outcome === 'failed') {
+    process.exit(1);
+  }
+  // 'completed' or 'paused' → exit 0
 }
 
 // ============================================================
