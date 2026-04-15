@@ -21,7 +21,7 @@ import { postActivityToLoka } from './lib/audit-bridge.js';
 import { extractResultJson, synthesizeResult, type ResultSchema } from './lib/result-schema.js';
 import { ENABLE_AF_23 } from './lib/constants.js';
 
-const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
+const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000; // 60 minutes
 
 interface SpawnConfig {
   systemPrompt: string;
