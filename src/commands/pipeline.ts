@@ -27,7 +27,7 @@ import { join, relative } from 'path';
 import { spawn } from 'child_process';
 import chalk from 'chalk';
 
-import { ENABLE_AF_26, ENABLE_AF_27 } from '../lib/constants.js';
+import { ENABLE_AF_26, ENABLE_AF_27, ENABLE_AF_28 } from '../lib/constants.js';
 import { loadConfig } from '../lib/config.js';
 import { resolveProject } from '../lib/workspace.js';
 import { createProvider } from '../lib/provider-factory.js';
@@ -57,8 +57,10 @@ import {
 import type { ResultSchema } from '../lib/result-schema.js';
 import {
   writePipelineState,
+  readPipelineState,
   initPipelineState,
   type PipelineState,
+  type PhaseState,
   type PhaseStatus,
 } from '../lib/pipeline-state.js';
 import { auditLog } from '../lib/audit.js';
@@ -78,6 +80,11 @@ export interface PipelineRunOptions {
 
 export interface PipelineListOptions {
   project?: string;
+}
+
+export interface PipelineStatusOptions {
+  project?: string;
+  json?: boolean;
 }
 
 // ============================================================
@@ -922,6 +929,93 @@ export function printExecutionPlan(
 }
 
 /**
+ * Compute the duration to display for a phase, including live elapsed for
+ * currently-running phases. Returns `undefined` when not known (pending, or
+ * a startedAt that won't parse).
+ */
+function livePhaseDurationMs(ps: PhaseState, now: number): number | undefined {
+  if (ps.durationMs !== undefined) return ps.durationMs;
+  if (ps.status === 'running' && ps.startedAt) {
+    const t = Date.parse(ps.startedAt);
+    if (!Number.isNaN(t)) return now - t;
+  }
+  return undefined;
+}
+
+/**
+ * Format the gate/status column for a single phase row.
+ * Shared between success summary, failure summary, and status rendering.
+ */
+function formatPhaseStatusColumn(ps: PhaseState): string {
+  if (ps.status === 'skipped') return dim('skipped');
+  if (ps.status === 'pending') return dim('pending');
+  if (ps.status === 'running') return dim('running');
+  if (ps.status === 'failed') return `gate: ${ps.gateResult ?? 'fail'}`;
+  // completed
+  return ps.gateResult ? `gate: ${ps.gateResult}` : '';
+}
+
+/**
+ * Render a single phase row — icon, name, agent, duration, gate/status, attempts.
+ * Shared between success summary, failure summary, and status rendering.
+ *
+ * Returns the formatted line (no trailing newline).
+ */
+function renderPhaseLine(
+  phaseName: string,
+  ps: PhaseState,
+  now: number,
+): string {
+  const icon = phaseIcon(ps.status);
+  const gate = formatPhaseStatusColumn(ps);
+  const attemptsTag =
+    typeof ps.attempts === 'number' && ps.attempts > 1
+      ? dim(`  (attempts: ${ps.attempts})`)
+      : '';
+  const durMs = livePhaseDurationMs(ps, now);
+  const dur =
+    ps.status === 'skipped' || ps.status === 'pending'
+      ? dim('—')
+      : durMs !== undefined
+        ? dim(formatDuration(durMs))
+        : dim('—');
+  return `  ${icon}  ${chalk.bold(phaseName.padEnd(12))} ${dim((ps.agent ?? '').padEnd(12))} ${dur.padEnd(10)} ${gate}${attemptsTag}`;
+}
+
+/**
+ * Render the gate-failure detail block for a failed phase.
+ * Emits one line per failure (plus optional remediation). Returns the lines
+ * — caller concatenates / prints. Empty array when there are no failures.
+ */
+function renderPhaseFailureDetail(ps: PhaseState): string[] {
+  if (ps.status !== 'failed') return [];
+  const failures =
+    ps.gateFailures && ps.gateFailures.length > 0
+      ? ps.gateFailures
+      : ps.gateFailure
+        ? [ps.gateFailure]
+        : [];
+  const lines: string[] = [];
+  if (failures.length > 0) {
+    for (const f of failures) {
+      lines.push(chalk.red(`       ${f.message}`));
+      if (f.remediation) {
+        lines.push(dim(`       → ${f.remediation}`));
+      }
+    }
+  } else {
+    const reasonMsg =
+      ps.failureReason === 'spawn_error'
+        ? 'spawn exited non-zero'
+        : ps.failureReason === 'no_result_json'
+          ? 'result.json not written'
+          : 'phase failed';
+    lines.push(chalk.red(`       ${reasonMsg}`));
+  }
+  return lines;
+}
+
+/**
  * Print a success summary when the pipeline completes.
  */
 function printSuccessSummary(
@@ -931,29 +1025,13 @@ function printSuccessSummary(
   pipelineStart: number,
 ): void {
   const total = Date.now() - pipelineStart;
+  const now = Date.now();
   console.log('');
   console.log(success(`Pipeline ${pipelineName} completed for ${state.ticket} (${formatDuration(total)})`));
   console.log('');
 
   for (const [phaseName, ps] of Object.entries(state.phases)) {
-    const icon = phaseIcon(ps.status);
-    const gate = ps.status === 'skipped'
-      ? dim('skipped')
-      : ps.gateResult
-        ? `gate: ${ps.gateResult}`
-        : '';
-    const attemptsTag =
-      typeof ps.attempts === 'number' && ps.attempts > 1
-        ? dim(`  (attempts: ${ps.attempts})`)
-        : '';
-    const dur = ps.status === 'skipped'
-      ? dim('—')
-      : ps.durationMs !== undefined
-        ? dim(formatDuration(ps.durationMs))
-        : '';
-    console.log(
-      `  ${icon}  ${chalk.bold(phaseName.padEnd(12))} ${dim((ps.agent ?? '').padEnd(12))} ${dur.padEnd(10)} ${gate}${attemptsTag}`,
-    );
+    console.log(renderPhaseLine(phaseName, ps, now));
   }
 
   console.log('');
@@ -974,57 +1052,11 @@ function printFailureSummary(
   console.log(error(`Pipeline ${pipelineName} failed at phase "${failedPhase}" for ${ticket}`));
   console.log('');
 
+  const now = Date.now();
   for (const [phaseName, ps] of Object.entries(state.phases)) {
-    const icon = phaseIcon(ps.status);
-    let gate = '';
-    if (ps.status === 'failed') {
-      gate = `gate: ${ps.gateResult ?? 'fail'}`;
-    } else if (ps.status === 'skipped') {
-      gate = dim('skipped');
-    } else if (ps.status === 'pending') {
-      gate = dim('pending');
-    } else if (ps.gateResult) {
-      gate = `gate: ${ps.gateResult}`;
-    }
-    const attemptsTag =
-      typeof ps.attempts === 'number' && ps.attempts > 1
-        ? dim(`  (attempts: ${ps.attempts})`)
-        : '';
-    const dur =
-      ps.status === 'skipped' || ps.status === 'pending'
-        ? dim('—')
-        : ps.durationMs !== undefined
-          ? dim(formatDuration(ps.durationMs))
-          : '';
-    console.log(
-      `  ${icon}  ${chalk.bold(phaseName.padEnd(12))} ${dim((ps.agent ?? '').padEnd(12))} ${dur.padEnd(10)} ${gate}${attemptsTag}`,
-    );
-
-    if (ps.status === 'failed') {
-      // Multi-failure rendering: prefer gateFailures[] if present; else fallback
-      const failures =
-        ps.gateFailures && ps.gateFailures.length > 0
-          ? ps.gateFailures
-          : ps.gateFailure
-            ? [ps.gateFailure]
-            : [];
-
-      if (failures.length > 0) {
-        for (const f of failures) {
-          console.log(chalk.red(`       ${f.message}`));
-          if (f.remediation) {
-            console.log(dim(`       → ${f.remediation}`));
-          }
-        }
-      } else {
-        const reasonMsg =
-          ps.failureReason === 'spawn_error'
-            ? 'spawn exited non-zero'
-            : ps.failureReason === 'no_result_json'
-              ? 'result.json not written'
-              : 'phase failed';
-        console.log(chalk.red(`       ${reasonMsg}`));
-      }
+    console.log(renderPhaseLine(phaseName, ps, now));
+    for (const detail of renderPhaseFailureDetail(ps)) {
+      console.log(detail);
     }
   }
 
@@ -1033,5 +1065,321 @@ function printFailureSummary(
   const failed = state.phases[failedPhase];
   if (failed?.agent) {
     console.log(dim(`  Log:   ${join(pipelineOutputDir, failed.agent, 'agent.log')}`));
+  }
+}
+
+// ============================================================
+// pipelineStatusCommand (AF-28)
+// ============================================================
+
+/**
+ * Format a relative duration for "started Xm ago" display.
+ * Uses minutes for anything >= 60s, seconds otherwise, hours for >= 1h.
+ */
+function formatRelative(ms: number): string {
+  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s ago`;
+  const minutes = Math.floor(totalSeconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  const remMin = minutes % 60;
+  return remMin === 0 ? `${hours}h ago` : `${hours}h ${remMin}m ago`;
+}
+
+/**
+ * Scan `<afPath>/output/*` and return the ticket directory names whose
+ * subfolder contains a `pipeline-state.json` file.
+ */
+export function findPipelineRuns(afPath: string): string[] {
+  const base = join(afPath, 'output');
+  if (!existsSync(base)) return [];
+  try {
+    return readdirSync(base, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name)
+      .filter((name) => existsSync(join(base, name, 'pipeline-state.json')));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Render a full pipeline run to stdout-ready lines.
+ * Pure: takes `now` so the helper is deterministic and unit-testable.
+ */
+export function renderPipelineState(
+  state: PipelineState,
+  afPath: string,
+  now: number = Date.now(),
+): string[] {
+  const lines: string[] = [];
+
+  // Header
+  let statusLine: string;
+  if (state.status === 'running') {
+    const started = Date.parse(state.startedAt);
+    const elapsed = Number.isNaN(started) ? undefined : now - started;
+    const el = elapsed !== undefined ? ` (${formatDuration(elapsed)})` : '';
+    statusLine = `Status: ${chalk.cyan('running')}${el}`;
+  } else if (state.status === 'completed') {
+    const started = Date.parse(state.startedAt);
+    const completed = state.completedAt ? Date.parse(state.completedAt) : NaN;
+    const total =
+      !Number.isNaN(started) && !Number.isNaN(completed)
+        ? completed - started
+        : undefined;
+    const el = total !== undefined ? ` (${formatDuration(total)})` : '';
+    statusLine = `Status: ${chalk.green('completed')}${el}`;
+  } else {
+    // failed
+    const started = Date.parse(state.startedAt);
+    const completed = state.completedAt ? Date.parse(state.completedAt) : NaN;
+    const total =
+      !Number.isNaN(started) && !Number.isNaN(completed)
+        ? completed - started
+        : undefined;
+    const el = total !== undefined ? ` (${formatDuration(total)})` : '';
+    statusLine = `Status: ${chalk.red('failed')}${el}`;
+  }
+
+  lines.push(heading(`Pipeline: ${state.pipeline} — ${state.ticket}`));
+  lines.push(statusLine);
+  lines.push('');
+
+  // Phase rows
+  for (const [phaseName, ps] of Object.entries(state.phases)) {
+    lines.push(renderPhaseLine(phaseName, ps, now));
+    for (const detail of renderPhaseFailureDetail(ps)) {
+      lines.push(detail);
+    }
+  }
+
+  lines.push('');
+  const pipelineOutputDir = join(afPath, 'output', state.ticket);
+  lines.push(dim(`  State:  ${join(pipelineOutputDir, 'pipeline-state.json')}`));
+  lines.push(dim(`  Output: ${pipelineOutputDir}/`));
+
+  if (state.warnings && state.warnings.length > 0) {
+    lines.push('');
+    lines.push(dim(`  Warnings:`));
+    for (const w of state.warnings) {
+      lines.push(dim(`    ${w}`));
+    }
+  }
+
+  return lines;
+}
+
+/**
+ * Render a one-line summary per pipeline run for list mode.
+ * Sorted by startedAt desc (newest first). Pure — caller supplies `now`.
+ */
+export function renderRunList(
+  states: PipelineState[],
+  now: number = Date.now(),
+): string[] {
+  const lines: string[] = [];
+
+  if (states.length === 0) {
+    lines.push(dim('No pipeline runs found.'));
+    return lines;
+  }
+
+  // Sort by startedAt desc (stable). Unparseable timestamps sink to the bottom.
+  const sorted = [...states].sort((a, b) => {
+    const ta = Date.parse(a.startedAt);
+    const tb = Date.parse(b.startedAt);
+    const va = Number.isNaN(ta) ? -Infinity : ta;
+    const vb = Number.isNaN(tb) ? -Infinity : tb;
+    return vb - va;
+  });
+
+  lines.push(heading('Pipeline runs'));
+  lines.push('');
+
+  for (const state of sorted) {
+    const icon =
+      state.status === 'running'
+        ? '🔄'
+        : state.status === 'completed'
+          ? '✅'
+          : '❌';
+
+    const started = Date.parse(state.startedAt);
+    const startedStr = Number.isNaN(started)
+      ? dim('—')
+      : dim(`started ${formatRelative(now - started)}`);
+
+    const completedTs =
+      state.completedAt !== undefined ? Date.parse(state.completedAt) : NaN;
+    const totalMs =
+      !Number.isNaN(started) && !Number.isNaN(completedTs)
+        ? completedTs - started
+        : undefined;
+
+    let trailing: string;
+    if (state.status === 'running') {
+      // Find current phase (prefer state.currentPhase, fallback: first running)
+      let currentPhase: string | undefined = state.currentPhase;
+      let currentPS: PhaseState | undefined = currentPhase
+        ? state.phases[currentPhase]
+        : undefined;
+      if (!currentPS || currentPS.status !== 'running') {
+        for (const [name, ps] of Object.entries(state.phases)) {
+          if (ps.status === 'running') {
+            currentPhase = name;
+            currentPS = ps;
+            break;
+          }
+        }
+      }
+      if (currentPhase && currentPS) {
+        const liveMs = livePhaseDurationMs(currentPS, now);
+        const liveStr = liveMs !== undefined ? formatDuration(liveMs) : '—';
+        trailing = `${startedStr}   phase: ${currentPhase} (${liveStr})`;
+      } else {
+        trailing = startedStr;
+      }
+    } else if (state.status === 'completed') {
+      const total = totalMs !== undefined ? formatDuration(totalMs) : '—';
+      const phaseValues = Object.values(state.phases);
+      const completedCount = phaseValues.filter(
+        (p) => p.status === 'completed',
+      ).length;
+      const totalCount = phaseValues.length;
+      trailing = `${dim(total.padEnd(10))}  ${completedCount}/${totalCount} phases passed`;
+    } else {
+      // failed
+      const total = totalMs !== undefined ? formatDuration(totalMs) : '—';
+      // Find the failed phase + short reason
+      let failedPhase: string | undefined;
+      let failedPS: PhaseState | undefined;
+      for (const [name, ps] of Object.entries(state.phases)) {
+        if (ps.status === 'failed') {
+          failedPhase = name;
+          failedPS = ps;
+          break;
+        }
+      }
+      let reason = 'failed';
+      if (failedPS) {
+        if (failedPS.failureReason === 'spawn_error') {
+          reason = 'spawn error';
+        } else if (failedPS.failureReason === 'no_result_json') {
+          reason = 'no result';
+        } else if (failedPS.failureReason === 'gate_failure') {
+          reason = 'gate failed';
+        } else if (failedPS.gateResult === 'fail') {
+          reason = 'gate failed';
+        }
+      }
+      const phaseInfo = failedPhase
+        ? `phase: ${failedPhase} — ${reason}`
+        : reason;
+      trailing = `${dim(total.padEnd(10))}  ${phaseInfo}`;
+    }
+
+    const statusWord =
+      state.status === 'running'
+        ? chalk.cyan('running  ')
+        : state.status === 'completed'
+          ? chalk.green('completed')
+          : chalk.red('failed   ');
+
+    lines.push(
+      `  ${icon}  ${chalk.bold(state.ticket.padEnd(8))} ${dim(state.pipeline.padEnd(10))} ${statusWord}  ${trailing}`,
+    );
+  }
+
+  lines.push('');
+  lines.push(dim(`  ${sorted.length} run${sorted.length === 1 ? '' : 's'}`));
+
+  return lines;
+}
+
+/**
+ * `af pipeline status [ticket]` — read-only view over pipeline-state.json.
+ *
+ *   - With `ticket`: render a single run's full phase breakdown.
+ *   - Without: list all runs newest-first.
+ *   - `--json`: emit the raw PipelineState (object or array) and skip prose.
+ */
+export function pipelineStatusCommand(
+  ticket: string | undefined,
+  options: PipelineStatusOptions,
+): void {
+  if (!ENABLE_AF_28) {
+    console.log(error('Pipeline status is disabled (ENABLE_AF_28=false).'));
+    process.exit(1);
+  }
+
+  const resolved = resolveProject(options.project);
+  if (!resolved) {
+    console.log(error('No project found. Run from a project dir or use --project <prefix>.'));
+    process.exit(1);
+  }
+  const { afPath } = resolved;
+
+  // Audit (no-op unless ENABLE_AF_8)
+  auditLog(afPath, {
+    event: 'pipeline.status_check',
+    ticket: ticket ? ticket.toUpperCase() : undefined,
+    actor: 'cli',
+    detail: ticket
+      ? `Status check for ${ticket.toUpperCase()}`
+      : 'Status check (all runs)',
+  });
+
+  // ---- Single-ticket mode ----
+  if (ticket) {
+    const normalized = ticket.toUpperCase();
+    const outputDir = join(afPath, 'output', normalized);
+    const stateFile = join(outputDir, 'pipeline-state.json');
+
+    if (!existsSync(stateFile)) {
+      console.log(error(`No pipeline run found for ${normalized}.`));
+      process.exit(1);
+    }
+
+    const state = readPipelineState(outputDir);
+    if (!state) {
+      console.log(error(`Could not parse pipeline-state.json for ${normalized}.`));
+      process.exit(1);
+    }
+
+    if (options.json) {
+      process.stdout.write(JSON.stringify(state, null, 2) + '\n');
+      return;
+    }
+
+    for (const line of renderPipelineState(state, afPath, Date.now())) {
+      console.log(line);
+    }
+    return;
+  }
+
+  // ---- List mode ----
+  const tickets = findPipelineRuns(afPath);
+  const states: PipelineState[] = [];
+  for (const t of tickets) {
+    const s = readPipelineState(join(afPath, 'output', t));
+    if (s) states.push(s);
+  }
+
+  if (options.json) {
+    // Sort to match the pretty output.
+    const sorted = [...states].sort((a, b) => {
+      const ta = Date.parse(a.startedAt);
+      const tb = Date.parse(b.startedAt);
+      const va = Number.isNaN(ta) ? -Infinity : ta;
+      const vb = Number.isNaN(tb) ? -Infinity : tb;
+      return vb - va;
+    });
+    process.stdout.write(JSON.stringify(sorted, null, 2) + '\n');
+    return;
+  }
+
+  for (const line of renderRunList(states, Date.now())) {
+    console.log(line);
   }
 }

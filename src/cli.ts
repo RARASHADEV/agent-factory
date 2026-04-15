@@ -21,7 +21,11 @@ import {
 } from './commands/agent.js';
 import { syncCommand } from './commands/sync.js';
 import { webhookServeCommand } from './commands/webhook.js';
-import { pipelineRunCommand, pipelineListCommand } from './commands/pipeline.js';
+import {
+  pipelineRunCommand,
+  pipelineListCommand,
+  pipelineStatusCommand,
+} from './commands/pipeline.js';
 
 const program = new Command();
 
@@ -159,6 +163,13 @@ pipeline
   .description('List available pipeline definitions')
   .option('-p, --project <prefix>', 'Project prefix')
   .action(pipelineListCommand);
+
+pipeline
+  .command('status [ticket]')
+  .description('Show pipeline run status from pipeline-state.json')
+  .option('-p, --project <prefix>', 'Project prefix')
+  .option('--json', 'Emit raw JSON')
+  .action(pipelineStatusCommand);
 
 // --- Sync command (AF-12) ---
 

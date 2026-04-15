@@ -24,7 +24,8 @@ export type AuditEvent =
   | 'pipeline.phase_fail'
   | 'pipeline.phase_retry'
   | 'pipeline.complete'
-  | 'pipeline.fail';
+  | 'pipeline.fail'
+  | 'pipeline.status_check';
 
 export interface AuditEntry {
   timestamp: string;        // ISO 8601
