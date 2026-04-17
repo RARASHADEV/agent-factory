@@ -1,10 +1,19 @@
 import { homedir } from 'os';
-import { join } from 'path';
+import { dirname, join } from 'path';
+import { fileURLToPath } from 'url';
 
 export const AF_DIR = '.af';
 export const GLOBAL_DIR = join(homedir(), '.af');
 export const GLOBAL_CONFIG = join(GLOBAL_DIR, 'config.yaml');
-export const AGENTS_DIR = join(homedir(), 'projects', 'agent-factory', 'agents');
+
+// Resolve AGENTS_DIR relative to the package root so the CLI works regardless
+// of where it's installed or which user is running it. At runtime this file
+// lives at <pkg>/dist/lib/constants.js, so the agents dir is two levels up.
+// Environment override: AF_AGENTS_DIR for users who want to point at a custom
+// agents directory (e.g. a clone or a global overlay).
+const HERE = dirname(fileURLToPath(import.meta.url));
+export const AGENTS_DIR =
+  process.env.AF_AGENTS_DIR ?? join(HERE, '..', '..', 'agents');
 
 export const STATUSES = [
   'backlog',
