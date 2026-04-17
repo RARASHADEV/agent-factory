@@ -246,9 +246,15 @@ export class LokaProvider implements TaskProvider {
     if (!match) return null;
 
     const [, prefix, numStr] = match;
+    const ticketNumber = Number(numStr);
+
+    // Loka's /tasks endpoint silently ignores the ticketNumber query param —
+    // it returns the entire project list regardless. Naively taking tasks[0]
+    // would target whichever task happens to come first in Loka's default
+    // sort, which is catastrophic: every update/move/assign/log routes to the
+    // same wrong task. Filter client-side to hit the right one.
     const params: Record<string, string> = {
       projectPrefix: prefix,
-      ticketNumber: numStr,
     };
 
     const result = await this.client.get<LokaFlatTask[] | { tasks: LokaFlatTask[] } | null>('/tasks', params);
@@ -263,8 +269,8 @@ export class LokaProvider implements TaskProvider {
       return null;
     }
 
-    if (tasks.length === 0) return null;
-    return this.toTask(tasks[0]);
+    const hit = tasks.find(t => t.projectPrefix === prefix && t.ticketNumber === ticketNumber);
+    return hit ? this.toTask(hit) : null;
   }
 
   // ── create ────────────────────────────────────────────────────────────────
