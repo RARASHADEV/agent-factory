@@ -51,6 +51,13 @@ export interface LokaProject {
   memberCount: number;
 }
 
+interface LokaPriority {
+  id: string;
+  name: string;
+  color: string;
+  position: number;
+}
+
 interface LokaMember {
   id: string;
   name: string;
@@ -87,6 +94,8 @@ export class LokaProvider implements TaskProvider {
   private priorityMap: Map<string, string> = new Map();       // AF name → Loka name
   private reversePriorityMap: Map<string, string> = new Map(); // Loka name → AF name
   private userCache: Map<string, string> = new Map();          // name → Loka UUID
+  private priorityIdCache: Map<string, string> = new Map();   // Loka priority name (lower) → UUID
+  private priorityIdCacheLoaded = false;
   private projectId: string | null = null;
   private configLoaded = false;
 
@@ -212,6 +221,13 @@ export class LokaProvider implements TaskProvider {
 
       allTasks.push(...items);
 
+      // Opportunistically cache priority IDs from task data
+      for (const lt of items) {
+        if (lt.priorityId && lt.priorityName) {
+          this.priorityIdCache.set(lt.priorityName.toLowerCase(), lt.priorityId);
+        }
+      }
+
       // If we got fewer than limit, we're done
       if (items.length < limit) break;
       // If we have a total and we've fetched it all
@@ -289,11 +305,18 @@ export class LokaProvider implements TaskProvider {
       title: input.title,
       description: input.description ?? '',
       projectId: this.projectId,
-      priorityId,
       assigneeId,
       dueDate: input.due ?? null,
       tags,
     };
+
+    if (priorityId) {
+      body.priorityId = priorityId;
+    } else {
+      // Fallback: some Loka API versions accept priorityName directly
+      const lokaName = this.priorityMap.get(input.priority ?? 'medium');
+      if (lokaName) body.priorityName = lokaName;
+    }
     if (statusId) body.statusId = statusId;
     // Preserve AF ticket numbering in Loka
     if (input.ticket) {
@@ -320,7 +343,13 @@ export class LokaProvider implements TaskProvider {
 
     if (input.priority !== undefined) {
       const priorityId = await this.resolvePriorityId(input.priority);
-      if (priorityId) body.priorityId = priorityId;
+      if (priorityId) {
+        body.priorityId = priorityId;
+      } else {
+        // Fallback: some Loka API versions accept priorityName directly
+        const lokaName = this.priorityMap.get(input.priority);
+        if (lokaName) body.priorityName = lokaName;
+      }
     }
 
     if (input.assignee === null) {
@@ -402,15 +431,33 @@ export class LokaProvider implements TaskProvider {
 
   /**
    * Resolve an AF priority name to Loka priority ID.
+   * Fetches priorities from Loka API (cached after first call).
    */
   private async resolvePriorityId(afName: string): Promise<string | null> {
-    // We need to get the priority ID from Loka. Unfortunately, the design
-    // says Loka uses UUIDs for priorityId. We'll look it up by listing
-    // a task or by a config endpoint if available.
-    // For now, we use the mapped name — Loka may accept name directly too.
-    // If the API requires an ID, this needs a /priorities endpoint.
-    // Per design, we try with priorityName field as fallback.
-    return null;
+    await this.loadPriorityIds();
+
+    const lokaName = this.priorityMap.get(afName) ?? afName;
+    return this.priorityIdCache.get(lokaName.toLowerCase()) ?? null;
+  }
+
+  /**
+   * Load priority IDs from Loka /priorities endpoint (cached).
+   * Falls back gracefully if the endpoint is unavailable.
+   */
+  private async loadPriorityIds(): Promise<void> {
+    if (this.priorityIdCacheLoaded) return;
+    this.priorityIdCacheLoaded = true; // Set early to avoid retry loops on failure
+
+    try {
+      const priorities = await this.client.get<LokaPriority[]>('/priorities');
+      if (priorities && Array.isArray(priorities)) {
+        for (const p of priorities) {
+          this.priorityIdCache.set(p.name.toLowerCase(), p.id);
+        }
+      }
+    } catch {
+      process.stderr.write('[loka] Warning: failed to load priorities, priority sync may not work\n');
+    }
   }
 
   /**
@@ -453,6 +500,11 @@ export class LokaProvider implements TaskProvider {
     const afPriority = this.reversePriorityMap.get(lt.priorityName)
       ?? this.reversePriorityMap.get(rawPriority)
       ?? rawPriority;
+
+    // Opportunistically populate priority ID cache from task data
+    if (lt.priorityId && lt.priorityName) {
+      this.priorityIdCache.set(lt.priorityName.toLowerCase(), lt.priorityId);
+    }
 
     return {
       ticket: `${lt.projectPrefix}-${lt.ticketNumber}`,
