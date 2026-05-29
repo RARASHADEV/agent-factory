@@ -131,7 +131,14 @@ export function validateEndpoint(endpoint: string): URL {
     );
   }
 
-  const host = url.hostname.toLowerCase();
+  // C7: WHATWG URL keeps IPv6 hosts bracketed (e.g. "[::1]"), but the
+  // allow-list stores the bare address ("::1"). Strip the surrounding
+  // brackets before comparing so an intended IPv6 loopback host matches.
+  const rawHost = url.hostname.toLowerCase();
+  const host =
+    rawHost.startsWith('[') && rawHost.endsWith(']')
+      ? rawHost.slice(1, -1)
+      : rawHost;
   const allowed = LOCAL_ENDPOINT_ALLOWLIST.some((entry) => {
     const e = entry.toLowerCase();
     // Exact host match, or a "*.suffix" wildcard entry.
@@ -165,9 +172,15 @@ interface DispatchOptions {
 /**
  * Detect a vLLM (OpenAI-compatible) endpoint vs. native Ollama.
  * vLLM serves `/v1/...`; Ollama serves `/api/...`. We key off the path.
+ *
+ * C8: match `/v1` as an exact path segment only — `pathname === '/v1'` (with
+ * or without a trailing slash) or a path under `/v1/`. A naive substring test
+ * (`includes('/v1')`) misfires on `/v1beta` or `/apiv1`, mis-routing the
+ * request and rebuilding a wrong `/v1/chat/completions` target → 404.
  */
 function isOpenAiCompatible(url: URL): boolean {
-  return url.pathname.includes('/v1');
+  const p = url.pathname;
+  return p === '/v1' || p === '/v1/' || p.startsWith('/v1/');
 }
 
 /**
@@ -307,8 +320,10 @@ async function dispatchOpenAiCompatible(
   signal: AbortSignal,
 ): Promise<BackendResult> {
   // vLLM OpenAI-compatible: POST {base}/v1/chat/completions
-  // Preserve any path prefix up to /v1.
-  const base = url.toString().replace(/\/+$/, '').replace(/\/v1.*$/, '');
+  // Preserve any path prefix up to the `/v1` segment, then strip `/v1` and
+  // everything after it. C8: anchor on `/v1` as a full segment (followed by a
+  // slash or end-of-string) so a prefix like `/apiv1` is not mangled.
+  const base = url.toString().replace(/\/+$/, '').replace(/\/v1(\/.*)?$/, '');
   const target = `${base}/v1/chat/completions`;
   const body = {
     model: config.model ?? 'default',

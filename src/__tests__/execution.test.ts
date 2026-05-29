@@ -111,6 +111,13 @@ describe('validateEndpoint', () => {
     assert.equal(url.hostname, '127.0.0.1');
   });
 
+  // C7: WHATWG URL bracketizes IPv6 hosts ("[::1]") but the allow-list holds
+  // "::1"; the bracketed form must still be accepted.
+  it('accepts the IPv6 loopback ::1 (bracketed hostname)', () => {
+    const url = validateEndpoint('http://[::1]:11434');
+    assert.equal(url.hostname, '[::1]');
+  });
+
   it('rejects an arbitrary external host (SSRF)', () => {
     assert.throws(() => validateEndpoint('http://evil.example.com/api'), /allow-list/);
   });
@@ -253,6 +260,53 @@ describe('dispatchLocal', () => {
     assert.ok(capturedUrl.endsWith('/v1/chat/completions'));
     assert.equal(res.output, 'vllm output');
     assert.deepEqual(res.usage, { inputTokens: 50, outputTokens: 12 });
+  });
+
+  // C8: a clean `/v1` endpoint (no trailing path) targets vLLM's
+  // /v1/chat/completions with no duplicated or mangled segment.
+  it('rebuilds a clean /v1 vLLM endpoint to /v1/chat/completions', async () => {
+    let capturedUrl = '';
+    const fakeFetch = (async (input: any) => {
+      capturedUrl = String(input);
+      return jsonResponse({
+        choices: [{ message: { content: 'ok' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      });
+    }) as unknown as typeof fetch;
+
+    const cfg: ExecutionConfig = {
+      backend: 'local',
+      model: 'mistral',
+      endpoint: 'http://localhost:8000/v1',
+      toolCalling: 'native',
+    };
+    await dispatchLocal(cfg, { systemPrompt: 's', taskPrompt: 't', fetchImpl: fakeFetch });
+    assert.equal(capturedUrl, 'http://localhost:8000/v1/chat/completions');
+  });
+
+  // C8: `/v1beta` must NOT be misdetected as vLLM — it is an Ollama-style host
+  // path, so the request goes to /api/chat (not a mangled /v1/... target).
+  it('treats a /v1beta path as Ollama, not vLLM (no over-match)', async () => {
+    let capturedUrl = '';
+    const fakeFetch = (async (input: any) => {
+      capturedUrl = String(input);
+      return jsonResponse({
+        message: { content: 'ollama output' },
+        prompt_eval_count: 2,
+        eval_count: 1,
+      });
+    }) as unknown as typeof fetch;
+
+    const cfg: ExecutionConfig = {
+      backend: 'local',
+      model: 'llama3.1',
+      endpoint: 'http://localhost:11434/v1beta',
+      toolCalling: 'prompt',
+    };
+    const res = await dispatchLocal(cfg, { systemPrompt: 's', taskPrompt: 't', fetchImpl: fakeFetch });
+    assert.ok(capturedUrl.endsWith('/api/chat'), `expected Ollama target, got ${capturedUrl}`);
+    assert.ok(!capturedUrl.includes('/v1/chat/completions'));
+    assert.equal(res.output, 'ollama output');
   });
 
   it('validates the endpoint before any network call (SSRF guard)', async () => {
