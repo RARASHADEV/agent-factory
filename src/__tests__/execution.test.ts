@@ -188,6 +188,22 @@ describe('normalizeUsage', () => {
     assert.deepEqual(normalizeUsage(null), { inputTokens: 0, outputTokens: 0 });
     assert.deepEqual(normalizeUsage({}), { inputTokens: 0, outputTokens: 0 });
   });
+
+  // D10b: normalizeUsage + TokenUsage are now a single source of truth shared
+  // with executor.ts. Previously execution.ts's copy did NOT recognize the
+  // Claude SDK shape (input_tokens / output_tokens), so token accounting could
+  // diverge by code path. Prove the shared normalizer recognizes it.
+  it('normalizes Claude SDK usage (input_tokens / output_tokens) — was the divergence', () => {
+    assert.deepEqual(normalizeUsage({ input_tokens: 1200, output_tokens: 340 }), {
+      inputTokens: 1200,
+      outputTokens: 340,
+    });
+  });
+
+  it('is the exact same function exported by executor.ts (one source of truth)', async () => {
+    const executor = await import('../lib/executor.js');
+    assert.equal(normalizeUsage, executor.normalizeUsage);
+  });
 });
 
 // ============================================================

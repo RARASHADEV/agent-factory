@@ -10,11 +10,18 @@
  */
 
 import { ENABLE_AF_42, LOCAL_ENDPOINT_ALLOWLIST } from './constants.js';
+import { normalizeUsage, type TokenUsage } from './executor.js';
 
 // ── Types (design §4.1, §5.1) ────────────────────────────────────────────
 
 export type Backend = 'claude' | 'local';
 export type ToolCalling = 'native' | 'prompt';
+
+// D10b: TokenUsage + normalizeUsage have a SINGLE source of truth in
+// executor.ts (the executor's shape-driven normalizer recognizes every backend
+// — Claude SDK / Ollama / vLLM — so token accounting can't diverge by path).
+// Re-export here so existing importers of './execution.js' keep working.
+export { normalizeUsage, type TokenUsage };
 
 /** Raw `execution` block as it may appear in agent frontmatter. All optional. */
 export interface ExecutionFrontmatter {
@@ -32,12 +39,6 @@ export interface ExecutionConfig {
   /** Resolved endpoint URL for local backends. undefined for claude. */
   endpoint?: string;
   toolCalling: ToolCalling;
-}
-
-/** Normalized token usage reported by a backend (design §5.1, AF-45). */
-export interface TokenUsage {
-  inputTokens: number;
-  outputTokens: number;
 }
 
 export interface BackendResult {
@@ -217,27 +218,6 @@ export function parsePromptToolAction(
     // Not parseable → treat as final answer, not an action.
   }
   return null;
-}
-
-/**
- * Normalize a backend's raw usage payload into TokenUsage (design §5.1).
- *  - Ollama:               prompt_eval_count / eval_count
- *  - vLLM (OpenAI-compat):  usage.prompt_tokens / usage.completion_tokens
- */
-export function normalizeUsage(raw: any): TokenUsage {
-  if (!raw || typeof raw !== 'object') {
-    return { inputTokens: 0, outputTokens: 0 };
-  }
-  // OpenAI-compatible nested usage.
-  const u = raw.usage ?? raw;
-  const inputTokens =
-    u.prompt_tokens ?? u.prompt_eval_count ?? raw.prompt_eval_count ?? 0;
-  const outputTokens =
-    u.completion_tokens ?? u.eval_count ?? raw.eval_count ?? 0;
-  return {
-    inputTokens: Number(inputTokens) || 0,
-    outputTokens: Number(outputTokens) || 0,
-  };
 }
 
 /**
