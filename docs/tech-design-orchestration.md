@@ -243,10 +243,33 @@ interface OrchestrationResult {
   steps: Array<{ agent: string; backend: string; output: unknown; usage: TokenUsage }>;
   finalizers: Record<string, unknown>;   // e.g. reviewer verdict
   approved: boolean;
-  totalUsage: TokenUsage;                 // accumulated across all steps
+  totalUsage: TokenUsage;                 // accumulated across all steps + supervisor turns
   stopReason: 'done' | 'max_delegations' | 'token_budget' | 'timeout' | 'no_progress' | 'max_revisions';
 }
 ```
+
+**`dryRun` dispatches nothing — including the supervisor (AF-FIX-B3).** The
+supervisor "decide which agents to call next" step normally runs the supervisor
+agent through the Executor (a live backend). In `dryRun`, **nothing may hit a
+live backend**, so the default planner does **not** dispatch the supervisor.
+Instead it emits a static plan — the roster, the configured policy, and a
+"supervisor `<agent>` would delegate at runtime to roster=[…]" line — then stops
+cleanly (`stopReason: 'done'`) with `totalUsage = {0,0}`. Required finalizers
+likewise only emit their dry-run plan lines. Net result: a `dryRun` run produces
+a fully traceable plan with **zero `Executor.run` calls**.
+
+**Supervisor turns are budgeted (AF-FIX-B4).** The supervisor runs through the
+same Executor seam as any worker, so its measured `usage` is accumulated into
+`totalUsage` and included in the `token_budget` check (§6.6) — supervisor turns
+are not free. The budget is checked after each supervisor turn as well as after
+each worker step, so a supervisor that overspends planning is caught.
+
+**No-progress signature is history-aware (AF-FIX-B9).** The `abort_on_no_progress`
+guard signs the *effective* input a call will run with (`call.input ?? default
+input`, where the default folds in accumulated history), not the raw (often
+-undefined) `call.input`. A legitimate same-agent re-call in a later round
+(history has grown) gets a different signature and proceeds; only a genuinely
+identical repeat trips the guard.
 
 ### 5.3 UI surface (Agent Factory)
 

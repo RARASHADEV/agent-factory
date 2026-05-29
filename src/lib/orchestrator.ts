@@ -119,6 +119,14 @@ export interface DelegationCall {
 export interface SupervisorDecision {
   done: boolean;
   calls?: DelegationCall[];
+  /**
+   * AF-FIX-B4: token usage the planner itself consumed producing this decision
+   * (e.g. the default {@link executorPlanner} runs the supervisor agent through
+   * the Executor). The loop adds this to `totalUsage` and the token_budget check
+   * so supervisor turns are budgeted like any other Executor.run. Optional:
+   * deterministic test planners omit it (treated as zero).
+   */
+  usage?: TokenUsage;
 }
 
 /** Read-only view of loop state handed to the planner each round. */
@@ -178,9 +186,24 @@ function readApproved(output: unknown): boolean {
   return true;
 }
 
-/** Stable signature of a delegation for the no-progress detector. */
-function callSignature(call: DelegationCall): string {
-  return JSON.stringify({ agent: call.agent, input: call.input ?? null });
+/**
+ * Stable signature of a delegation for the no-progress detector (§6.6).
+ *
+ * AF-FIX-B9: sign the *effective* input the call will actually run with — the
+ * same `call.input ?? defaultInput(objective, history)` the executor resolves —
+ * not the raw (often-undefined) `call.input`. Because `defaultInput` folds in
+ * the accumulated history, a legitimate same-agent re-call in a later round
+ * (where history has grown) produces a *different* signature and is allowed;
+ * only a genuinely identical repeat (same agent, same explicit input, or same
+ * agent over unchanged history) collapses to a duplicate and trips the guard.
+ */
+function callSignature(
+  call: DelegationCall,
+  objective: string,
+  history: readonly OrchestrationStep[],
+): string {
+  const input = call.input ?? defaultInput(objective, history);
+  return JSON.stringify({ agent: call.agent, input });
 }
 
 // ── Orchestrator ─────────────────────────────────────────────────────────
@@ -231,7 +254,7 @@ export class Orchestrator {
     const parallelizable = new Set(policy.parallelizable ?? []);
 
     const startedAt = now();
-    const planner = opts.planner ?? this.executorPlanner(config);
+    const planner = opts.planner ?? this.executorPlanner(config, opts.dryRun === true, trace);
 
     const steps: OrchestrationStep[] = [];
     const finalizerOutputs: Record<string, unknown> = {};
@@ -265,6 +288,26 @@ export class Orchestrator {
         delegations,
       });
 
+      // AF-FIX-B4: the planner (default = supervisor agent via Executor) reports
+      // the usage it consumed. Account it before anything else so every
+      // Executor.run — including supervisor turns — flows through one budgeted
+      // path. In dryRun the planner dispatches nothing, so usage is zero.
+      if (decision.usage) {
+        totalUsage = addUsage(totalUsage, decision.usage);
+      }
+
+      // token_budget guardrail (cost) — supervisor turns count too. Checked
+      // here so a supervisor that overspends planning is caught even before it
+      // dispatches a worker (spec §5.1/§6.6: stop on the step after crossing).
+      if (tokenBudget !== undefined) {
+        const spent = totalUsage.inputTokens + totalUsage.outputTokens;
+        if (spent >= tokenBudget) {
+          stopReason = 'token_budget';
+          trace(`[guardrail] token_budget: ${spent} >= ${tokenBudget} (supervisor) — stopping`);
+          break;
+        }
+      }
+
       if (decision.done) {
         trace('[supervisor] decided: done');
         stopReason = 'done';
@@ -291,13 +334,17 @@ export class Orchestrator {
         }
       }
 
-      // no_progress guardrail — repeated identical (agent+input) call.
+      // no_progress guardrail — repeated identical (agent + effective input)
+      // call. AF-FIX-B9: compute each signature ONCE here, keyed on the
+      // effective input (incl. history), then reuse it when marking below.
+      const signatures = abortOnNoProgress
+        ? calls.map((call) => callSignature(call, objective, steps))
+        : [];
       if (abortOnNoProgress) {
-        for (const call of calls) {
-          const sig = callSignature(call);
-          if (seenSignatures.has(sig)) {
+        for (let i = 0; i < calls.length; i++) {
+          if (seenSignatures.has(signatures[i])) {
             stopReason = 'no_progress';
-            trace(`[guardrail] no_progress: repeated call ${call.agent} — stopping`);
+            trace(`[guardrail] no_progress: repeated call ${calls[i].agent} — stopping`);
             break loop;
           }
         }
@@ -313,8 +360,9 @@ export class Orchestrator {
       }
 
       // Mark signatures only once we've committed to executing this round.
+      // AF-FIX-B9: reuse the signatures computed above (don't recompute).
       if (abortOnNoProgress) {
-        for (const call of calls) seenSignatures.add(callSignature(call));
+        for (const sig of signatures) seenSignatures.add(sig);
       }
 
       // Execute the round. Fan out concurrently iff every call is parallelizable
@@ -536,9 +584,36 @@ export class Orchestrator {
    * expected to emit either `{ done: true }` or `{ calls: [{ agent, ... }] }`
    * (as an object or a JSON string). Anything unrecognized is treated as done
    * so an under-specified supervisor stops cleanly rather than looping.
+   *
+   * AF-FIX-B4: the supervisor runs through the Executor like any other agent, so
+   * its measured usage is returned on the decision and accounted by the loop —
+   * supervisor turns are budgeted, not discarded.
+   *
+   * AF-FIX-B3: in dryRun NOTHING may hit a live backend — including the
+   * supervisor. So the default planner does NOT dispatch the supervisor in
+   * dryRun. Instead it emits a static plan (roster + the supervisor that *would*
+   * delegate at runtime) once, then reports `done` with zero usage so the run
+   * completes without any Executor.run. (Tech design §5.2 documents this.)
    */
-  private executorPlanner(config: DomainConfig): SupervisorPlanner {
+  private executorPlanner(
+    config: DomainConfig,
+    dryRun: boolean,
+    trace: (line: string) => void,
+  ): SupervisorPlanner {
+    let dryRunPlanEmitted = false;
     return async (state: PlannerState): Promise<SupervisorDecision> => {
+      if (dryRun) {
+        if (!dryRunPlanEmitted) {
+          dryRunPlanEmitted = true;
+          trace(
+            `[dry-run] supervisor ${config.supervisor.agent} would delegate at runtime ` +
+              `to roster=[${config.roster.join(', ')}] (no agent dispatched)`,
+          );
+        }
+        // No live backend in dryRun: emit a static plan and stop cleanly with
+        // zero usage. Required finalizers still log their dry-run plan lines.
+        return { done: true, usage: { inputTokens: 0, outputTokens: 0 } };
+      }
       const result = await this.executor.run(config.supervisor.agent, {
         objective: state.objective,
         context: {
@@ -548,7 +623,9 @@ export class Orchestrator {
           goal: config.supervisor.goal,
         },
       });
-      return parseSupervisorDecision(result.output);
+      const decision = parseSupervisorDecision(result.output);
+      decision.usage = result.usage;
+      return decision;
     };
   }
 }

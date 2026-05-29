@@ -479,6 +479,139 @@ describe('dryRun', () => {
 });
 
 // ============================================================
+// AF-FIX-B3 — dryRun never dispatches the supervisor (default planner)
+// ============================================================
+
+describe('AF-FIX-B3 — dryRun does not dispatch the supervisor', () => {
+  it('with the DEFAULT planner, dryRun runs no Executor.run at all', async () => {
+    // No injected planner → exercises executorPlanner. The supervisor agent
+    // (campaign-director) must NOT be dispatched in dryRun.
+    const stub = new StubExecutor({ fallback: { output: 'x', usage: usage(7, 7) } });
+    const lines: string[] = [];
+    const orch = new Orchestrator(stub);
+    const result = await orch.run('marketing', 'go', {
+      config: config(),
+      dryRun: true,
+      logger: (l) => lines.push(l),
+    });
+
+    // The core QA assertion: zero Executor.run calls in dryRun.
+    assert.equal(stub.calls.length, 0, 'dryRun must not dispatch ANY agent, incl. the supervisor');
+    assert.equal(stub.calls.some((c) => c.agentId === 'campaign-director'), false);
+    assert.equal(result.dryRun, true);
+    assert.equal(result.stopReason, 'done');
+    assert.deepEqual(result.totalUsage, usage(0, 0));
+    // Static plan mentions the supervisor would delegate at runtime + the roster.
+    assert.ok(
+      lines.some((l) => l.includes('would delegate at runtime')),
+      'should emit a static "supervisor would delegate at runtime" plan line',
+    );
+    // Finalizers still appear in the plan (as dry-run lines) but aren't dispatched.
+    assert.ok(lines.some((l) => l.includes('would run finalizer reviewer')));
+  });
+});
+
+// ============================================================
+// AF-FIX-B4 — supervisor usage is counted and budgeted
+// ============================================================
+
+describe('AF-FIX-B4 — supervisor token usage is accounted', () => {
+  it('adds the default planner (supervisor) usage to totalUsage', async () => {
+    // Supervisor emits one delegation then done; each supervisor turn costs 3/4.
+    let round = 0;
+    const stub = new StubExecutor({
+      results: {
+        'campaign-director': { output: '', usage: usage(3, 4) },
+        researcher: { output: 'r', usage: usage(10, 20) },
+        reviewer: { output: { approved: true }, usage: usage(1, 1) },
+      },
+    });
+    const orig = stub.run.bind(stub);
+    stub.run = async (agentId, input) => {
+      if (agentId === 'campaign-director') {
+        round++;
+        const decision = round === 1 ? { calls: [{ agent: 'researcher' }] } : { done: true };
+        return { output: JSON.stringify(decision), usage: usage(3, 4) };
+      }
+      return orig(agentId, input);
+    };
+
+    const orch = new Orchestrator(stub);
+    const result = await orch.run('marketing', 'go', { config: config() });
+
+    // 2 supervisor turns (3+4 each) + researcher (10+20) + reviewer (1+1)
+    //  input:  3 + 3 + 10 + 1 = 17 ; output: 4 + 4 + 20 + 1 = 29
+    assert.deepEqual(result.totalUsage, usage(17, 29));
+  });
+
+  it('token_budget stops the run on a supervisor turn that crosses the budget', async () => {
+    // Supervisor alone burns 100/turn; budget 150 → 2nd supervisor turn crosses it.
+    const stub = new StubExecutor({
+      results: {
+        'campaign-director': { output: '', usage: usage(50, 50) },
+        researcher: { output: 'r', usage: usage(0, 0) },
+      },
+    });
+    stub.run = async (agentId) => {
+      if (agentId === 'campaign-director') {
+        // Always keep delegating so only the budget can stop the run.
+        return { output: JSON.stringify({ calls: [{ agent: 'researcher' }] }), usage: usage(50, 50) };
+      }
+      return { output: 'r', usage: usage(0, 0) };
+    };
+    const orch = new Orchestrator(stub);
+    const result = await orch.run('marketing', 'go', {
+      config: config({ token_budget: 150, required_finalizers: [], abort_on_no_progress: false }),
+    });
+    assert.equal(result.stopReason, 'token_budget');
+    // turn1 supervisor=100 (<150) → researcher; turn2 supervisor=200 (>=150) → stop.
+    assert.equal(result.totalUsage.inputTokens + result.totalUsage.outputTokens >= 150, true);
+  });
+});
+
+// ============================================================
+// AF-FIX-B9 — no_progress no longer false-trips on default input
+// ============================================================
+
+describe('AF-FIX-B9 — no_progress robustness', () => {
+  it('does NOT trip when the same agent is re-called with default input across rounds', async () => {
+    // The default planner emits calls with no explicit input. Because history
+    // grows each round, the effective signature differs → legitimate progress.
+    const stub = new StubExecutor({ fallback: { output: 'r', usage: usage(1, 1) } });
+    // researcher each round (no input) for 3 rounds, then done.
+    const planner = scriptedPlanner([
+      { done: false, calls: [{ agent: 'researcher' }] },
+      { done: false, calls: [{ agent: 'researcher' }] },
+      { done: false, calls: [{ agent: 'researcher' }] },
+      { done: true },
+    ]);
+    const orch = new Orchestrator(stub);
+    const result = await orch.run('marketing', 'go', {
+      config: config({ required_finalizers: [], abort_on_no_progress: true }),
+      planner,
+    });
+    assert.equal(result.stopReason, 'done', 'a healthy re-call run must not false-trip no_progress');
+    assert.equal(result.steps.length, 3);
+  });
+
+  it('still trips on a genuinely identical repeated call (explicit input)', async () => {
+    // Same agent + same EXPLICIT input → identical signature regardless of history.
+    const stub = new StubExecutor({ fallback: { output: 'r', usage: usage(1, 1) } });
+    const planner: SupervisorPlanner = () => ({
+      done: false,
+      calls: [{ agent: 'researcher', input: { objective: 'identical' } }],
+    });
+    const orch = new Orchestrator(stub);
+    const result = await orch.run('marketing', 'go', {
+      config: config({ required_finalizers: [], abort_on_no_progress: true }),
+      planner,
+    });
+    assert.equal(result.stopReason, 'no_progress');
+    assert.equal(result.steps.length, 1);
+  });
+});
+
+// ============================================================
 // parseSupervisorDecision — output parsing
 // ============================================================
 
