@@ -1,0 +1,26 @@
+# AF-43: Sample domain config (spec §4.2).
+# Data-only: declares the supervisor, roster, and guardrail policy that
+# parameterize the generic orchestration engine. Every slug below must
+# resolve to a real agents/<slug>.md file (validated by the loader, §6.1).
+domain: marketing
+supervisor:
+  agent: workflow-manager
+  goal: Turn a campaign objective into reviewed, publish-ready assets
+roster:
+  - researcher
+  - product-analyst
+  - content-writer
+  - ghostwriter
+  - qa
+policy:
+  max_delegations: 12        # max total agent calls (length)
+  roster_only: true          # supervisor may only call roster agents (breadth)
+  token_budget: 200000       # hard ceiling on accumulated tokens (cost)
+  timeout_seconds: 600       # wall-clock kill switch
+  required_finalizers:       # always run before "done" (quality gate)
+    - qa
+  max_revision_loops: 2      # bound writer<->review retries on approved:false
+  abort_on_no_progress: true # stop on repeated identical calls / no progress
+  parallelizable:            # safe to run in parallel
+    - researcher
+    - product-analyst
