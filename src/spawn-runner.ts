@@ -15,7 +15,7 @@
 
 import { writeFileSync, mkdirSync, appendFileSync, readFileSync } from 'fs';
 import { join } from 'path';
-import { runAgent } from './lib/sdk.js';
+import { dispatchAgent, resolveExecution, type ExecutionFrontmatter } from './lib/execution.js';
 import { auditLog } from './lib/audit.js';
 import { postActivityToLoka } from './lib/audit-bridge.js';
 import { extractResultJson, synthesizeResult, type ResultSchema } from './lib/result-schema.js';
@@ -35,6 +35,7 @@ interface SpawnConfig {
   agentSlug: string;
   timeoutMs?: number;
   afPath?: string;   // Optional: workspace .af/ path for audit logging
+  execution?: ExecutionFrontmatter;  // AF-42: per-agent backend routing
 }
 
 // --- Crash safety ---
@@ -112,12 +113,31 @@ async function main() {
   timer.unref(); // don't keep process alive just for the timer
 
   try {
-    const result = await runAgent(config.systemPrompt, config.taskPrompt, {
-      model: config.model,
+    // AF-42: resolve the agent's execution backend (claude default, or local).
+    // `config.model` overrides the frontmatter model when set (e.g. CLI default).
+    const execConfig = resolveExecution(config.execution);
+    if (config.model) execConfig.model = config.model;
+
+    const runStart = Date.now();
+    const dispatched = await dispatchAgent(execConfig, {
+      systemPrompt: config.systemPrompt,
+      taskPrompt: config.taskPrompt,
       maxTurns: config.maxTurns,
       tools: config.tools,
       cwd: config.cwd,
+      timeoutMs: config.timeoutMs,
     });
+
+    // Normalize into the shape the rest of main() expects. Local backends have
+    // no turn concept; success is implied by a non-error completion.
+    const result = {
+      result: dispatched.output,
+      success: true,
+      numTurns: 0,
+      durationMs: Date.now() - runStart,
+      usage: dispatched.usage,
+      backend: dispatched.backend,
+    };
 
     clearTimeout(timer);
 
@@ -128,6 +148,8 @@ async function main() {
     status.status = 'completed';
     status.completedAt = new Date().toISOString();
     status.success = result.success;
+    status.backend = result.backend;        // AF-42
+    status.usage = result.usage;            // AF-42/AF-45: normalized TokenUsage
     writeFileSync(statusFile, JSON.stringify(status, null, 2));
 
     // AF-23: Extract or synthesize result.json

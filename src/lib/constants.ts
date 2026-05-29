@@ -72,3 +72,22 @@ export const ENABLE_AF_28 = true;
  *  the runner's between-phase sentinel check is skipped — existing run behavior
  *  is unaffected. */
 export const ENABLE_AF_34 = true;
+
+/** AF-42: Local execution backend (Ollama/vLLM) routing via the `execution`
+ *  frontmatter block. When false, an agent requesting `backend: local` is
+ *  rejected and only the Claude SDK path runs — preserving prior behavior. */
+export const ENABLE_AF_42 = true;
+
+/**
+ * AF-42 (§8 SSRF guard): allow-list of hosts a local `execution.endpoint` may
+ * target. Operator-set agent files could otherwise point the dispatcher at an
+ * arbitrary internal service. Entries are matched case-insensitively; a leading
+ * "*." marks a wildcard suffix (e.g. "*.internal" matches "ollama.internal").
+ * Override via the AF_LOCAL_ENDPOINT_ALLOWLIST env var (comma-separated).
+ */
+export const LOCAL_ENDPOINT_ALLOWLIST: string[] = (
+  process.env.AF_LOCAL_ENDPOINT_ALLOWLIST ?? 'localhost,127.0.0.1,::1'
+)
+  .split(',')
+  .map((h) => h.trim())
+  .filter(Boolean);
