@@ -43,6 +43,12 @@ export interface TokenUsage {
 export interface BackendResult {
   output: string;
   usage: TokenUsage;
+  /**
+   * AF-FIX-A1: Whether the run actually succeeded, as reported by the backend.
+   * For local backends a non-error HTTP completion is a success, but empty
+   * output is surfaced as a failure rather than a false success.
+   */
+  success: boolean;
 }
 
 /** Default local endpoint when an agent specifies no `endpoint` (Ollama default). */
@@ -287,8 +293,9 @@ async function dispatchOllama(
   }
 
   const data = (await res.json()) as any;
-  const output = data?.message?.content ?? data?.response ?? '';
-  return { output: String(output), usage: normalizeUsage(data) };
+  const output = String(data?.message?.content ?? data?.response ?? '');
+  // AF-FIX-A1: a non-error completion is a success, but empty output is not.
+  return { output, usage: normalizeUsage(data), success: output.trim().length > 0 };
 }
 
 async function dispatchOpenAiCompatible(
@@ -324,8 +331,9 @@ async function dispatchOpenAiCompatible(
   }
 
   const data = (await res.json()) as any;
-  const output = data?.choices?.[0]?.message?.content ?? '';
-  return { output: String(output), usage: normalizeUsage(data) };
+  const output = String(data?.choices?.[0]?.message?.content ?? '');
+  // AF-FIX-A1: a non-error completion is a success, but empty output is not.
+  return { output, usage: normalizeUsage(data), success: output.trim().length > 0 };
 }
 
 // ── Backend router (design §2.1 — routing lives in ONE place) ────────────
@@ -348,6 +356,12 @@ export interface DispatchAgentResult {
   backend: Backend;
   output: string;
   usage: TokenUsage;
+  /**
+   * AF-FIX-A1: The real outcome of the run, derived from the backend:
+   * Claude → SDK subtype === 'success'; local → non-error completion with
+   * non-empty output. Callers must surface this rather than hardcoding true.
+   */
+  success: boolean;
 }
 
 /**
@@ -372,7 +386,7 @@ export async function dispatchAgent(
       timeoutMs: opts.timeoutMs,
       fetchImpl: opts.fetchImpl,
     });
-    return { backend: 'local', output: res.output, usage: res.usage };
+    return { backend: 'local', output: res.output, usage: res.usage, success: res.success };
   }
 
   // Claude path — existing SDK wrapper. Imported lazily to avoid loading the
@@ -389,7 +403,36 @@ export async function dispatchAgent(
     backend: 'claude',
     output: result.result,
     usage: result.usage ?? { inputTokens: 0, outputTokens: 0 },
+    // AF-FIX-A1: surface the real SDK outcome (runAgent derives success from
+    // the result event's subtype === 'success'); do NOT hardcode true.
+    success: result.success,
   };
+}
+
+// ── CLI default-model application (AF-FIX-A2) ─────────────────────────────
+
+/**
+ * Decide the effective model for a dispatch given a resolved execution config
+ * and the CLI's default model.
+ *
+ * AF-FIX-A2: the AF CLI always passes a default model (e.g. 'sonnet') which is a
+ * Claude id. Blindly applying it clobbers a local agent's resolved
+ * execution.model (an Ollama/vLLM tag), routing the request to a non-existent
+ * local model. Rule: the per-agent execution.model wins for backend:'local';
+ * the CLI default is only applied for the claude backend, or when no
+ * execution.model was specified at all.
+ *
+ * Returns the model the dispatcher should use (may be undefined → backend
+ * default applies inside dispatchAgent).
+ */
+export function applyCliDefaultModel(
+  config: ExecutionConfig,
+  cliDefaultModel: string | undefined,
+): string | undefined {
+  if (cliDefaultModel && (config.backend === 'claude' || !config.model)) {
+    return cliDefaultModel;
+  }
+  return config.model;
 }
 
 // ── Guard so the feature can be disabled wholesale ───────────────────────

@@ -132,6 +132,25 @@ describe('AfCliExecutor', () => {
     assert.deepEqual(result.usage, { inputTokens: 0, outputTokens: 0 });
   });
 
+  // AF-FIX-A6: backend is threaded from AF CLI dispatch into AgentResult.
+  it('propagates the backend reported by AF CLI dispatch', async () => {
+    const dispatch: AfCliDispatch = async () => ({
+      output: 'out',
+      usage: { input_tokens: 1, output_tokens: 1 },
+      backend: 'local',
+    });
+    const executor = new AfCliExecutor({ dispatch });
+    const result = await executor.run('content-writer', INPUT);
+    assert.equal(result.backend, 'local');
+  });
+
+  it('leaves backend unset when AF CLI dispatch reports none', async () => {
+    const dispatch: AfCliDispatch = async () => ({ output: 'out', usage: {} });
+    const executor = new AfCliExecutor({ dispatch });
+    const result = await executor.run('content-writer', INPUT);
+    assert.equal(result.backend, undefined);
+  });
+
   it('throws if constructed without a dispatch function', () => {
     // @ts-expect-error — intentionally invalid for the runtime guard test
     assert.throws(() => new AfCliExecutor({}), /requires a `dispatch` function/);
@@ -173,6 +192,21 @@ describe('StubExecutor', () => {
     const r2 = await stub.run('content-writer', INPUT);
     assert.equal(r2.output, 'draft');
     assert.deepEqual(r2.usage, { inputTokens: 40, outputTokens: 90 });
+  });
+
+  // AF-FIX-A6: StubExecutor can carry a backend for orchestrator step tests.
+  it('returns an optional backend from a canned result', async () => {
+    const stub = new StubExecutor({
+      results: { 'content-writer': { output: 'draft', usage: { inputTokens: 1, outputTokens: 1 }, backend: 'claude' } },
+    });
+    const r = await stub.run('content-writer', INPUT);
+    assert.equal(r.backend, 'claude');
+  });
+
+  it('omits backend when a canned result does not set one', async () => {
+    const stub = new StubExecutor({ fallback: { output: 'ok', usage: { inputTokens: 0, outputTokens: 0 } } });
+    const r = await stub.run('x', INPUT);
+    assert.equal(r.backend, undefined);
   });
 
   it('records every call in order for assertions', async () => {

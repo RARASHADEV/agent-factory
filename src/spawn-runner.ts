@@ -15,7 +15,7 @@
 
 import { writeFileSync, mkdirSync, appendFileSync, readFileSync } from 'fs';
 import { join } from 'path';
-import { dispatchAgent, resolveExecution, type ExecutionFrontmatter } from './lib/execution.js';
+import { dispatchAgent, resolveExecution, applyCliDefaultModel, type ExecutionFrontmatter } from './lib/execution.js';
 import { auditLog } from './lib/audit.js';
 import { postActivityToLoka } from './lib/audit-bridge.js';
 import { extractResultJson, synthesizeResult, type ResultSchema } from './lib/result-schema.js';
@@ -114,10 +114,17 @@ async function main() {
 
   try {
     // AF-42: resolve the agent's execution backend (claude default, or local).
-    // `config.model` overrides the frontmatter model when set (e.g. CLI default).
     const execConfig = resolveExecution(config.execution);
-    if (config.model) execConfig.model = config.model;
+    // AF-FIX-A2: the CLI always passes a default model (e.g. 'sonnet'), which
+    // would clobber a local agent's resolved execution.model. The per-agent
+    // execution.model must win for backend:'local'; only apply the CLI default
+    // for the claude backend, or when no execution.model was specified at all.
+    execConfig.model = applyCliDefaultModel(execConfig, config.model);
 
+    // AF-FIX-A5: pass the resolved run budget to the local dispatch path.
+    // config.timeoutMs is usually undefined; without this dispatchLocal would
+    // default to 120s and abort long local generations well before the
+    // process-level guard (DEFAULT_TIMEOUT_MS) fires.
     const runStart = Date.now();
     const dispatched = await dispatchAgent(execConfig, {
       systemPrompt: config.systemPrompt,
@@ -125,14 +132,15 @@ async function main() {
       maxTurns: config.maxTurns,
       tools: config.tools,
       cwd: config.cwd,
-      timeoutMs: config.timeoutMs,
+      timeoutMs: config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     });
 
-    // Normalize into the shape the rest of main() expects. Local backends have
-    // no turn concept; success is implied by a non-error completion.
+    // Normalize into the shape the rest of main() expects. Success is the real
+    // outcome reported by the backend (AF-FIX-A1) — Claude's SDK subtype, or a
+    // non-error local completion with non-empty output — never hardcoded.
     const result = {
       result: dispatched.output,
-      success: true,
+      success: dispatched.success,
       numTurns: 0,
       durationMs: Date.now() - runStart,
       usage: dispatched.usage,
@@ -144,8 +152,10 @@ async function main() {
     // Write result
     writeFileSync(resultFile, result.result || '(no output)');
 
-    // Update status
-    status.status = 'completed';
+    // Update status. AF-FIX-A1: a non-error completion that the backend reports
+    // as unsuccessful (e.g. empty local output) is recorded as completed but
+    // NOT successful — the real outcome is surfaced, not masked as success.
+    status.status = result.success ? 'completed' : 'failed';
     status.completedAt = new Date().toISOString();
     status.success = result.success;
     status.backend = result.backend;        // AF-42

@@ -556,10 +556,12 @@ export class Orchestrator {
 // ── Parsing helpers (exported for tests) ─────────────────────────────────
 
 function toStep(agent: string, result: AgentResult): OrchestrationStep {
+  // AF-FIX-A6: AgentResult.backend is now threaded from AF CLI dispatch
+  // (execution.ts → AfCliExecutor). Fall back to 'unknown' only when a
+  // backend was genuinely not reported (e.g. a stub without one).
   const backend =
-    result && typeof result === 'object' && 'backend' in result &&
-    typeof (result as { backend?: unknown }).backend === 'string'
-      ? (result as { backend: string }).backend
+    typeof result.backend === 'string' && result.backend.length > 0
+      ? result.backend
       : 'unknown';
   return { agent, backend, output: result.output, usage: result.usage };
 }

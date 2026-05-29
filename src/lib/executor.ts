@@ -50,6 +50,13 @@ export interface AgentResult {
   output: unknown;
   /** Actual usage reported by the backend (not estimated). */
   usage: TokenUsage;
+  /**
+   * AF-FIX-A6: The backend that actually ran the agent (e.g. 'claude' |
+   * 'local'), as reported by AF CLI dispatch. Threaded through so the
+   * orchestrator can record it per step instead of defaulting to 'unknown'.
+   * Optional so StubExecutor / older callers stay valid.
+   */
+  backend?: string;
 }
 
 /**
@@ -148,7 +155,12 @@ export function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
  * tests can drive it without spawning a process.
  */
 export interface AfCliDispatch {
-  (agentId: string, input: AgentInput): Promise<{ output: unknown; usage: unknown }>;
+  (agentId: string, input: AgentInput): Promise<{
+    output: unknown;
+    usage: unknown;
+    /** AF-FIX-A6: backend that ran the agent; AF CLI dispatch computes it. */
+    backend?: string;
+  }>;
 }
 
 /** Construction options for {@link AfCliExecutor}. */
@@ -180,8 +192,12 @@ export class AfCliExecutor implements Executor {
       throw new Error('Executor.run requires a non-empty agentId');
     }
 
-    const { output, usage } = await this.dispatch(agentId, input);
-    return { output, usage: normalizeUsage(usage) };
+    const { output, usage, backend } = await this.dispatch(agentId, input);
+    // AF-FIX-A6: propagate the backend AF CLI reported so the orchestrator can
+    // record it per step. Omitted when dispatch doesn't report one.
+    const result: AgentResult = { output, usage: normalizeUsage(usage) };
+    if (typeof backend === 'string' && backend.length > 0) result.backend = backend;
+    return result;
   }
 }
 
@@ -196,6 +212,11 @@ export interface CannedResult {
    * tests can exercise the normalization path too.
    */
   usage: TokenUsage | RawUsage;
+  /**
+   * AF-FIX-A6: optional backend to report for this canned run, so orchestrator
+   * tests can assert the backend is threaded into each step. Defaults to unset.
+   */
+  backend?: string;
 }
 
 /** Construction options for {@link StubExecutor}. */
@@ -237,6 +258,10 @@ export class StubExecutor implements Executor {
       );
     }
 
-    return { output: canned.output, usage: normalizeUsage(canned.usage) };
+    const result: AgentResult = { output: canned.output, usage: normalizeUsage(canned.usage) };
+    if (typeof canned.backend === 'string' && canned.backend.length > 0) {
+      result.backend = canned.backend;
+    }
+    return result;
   }
 }

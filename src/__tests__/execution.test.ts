@@ -17,6 +17,7 @@ import {
   normalizeUsage,
   dispatchLocal,
   dispatchAgent,
+  applyCliDefaultModel,
   DEFAULT_LOCAL_ENDPOINT,
   type ExecutionConfig,
 } from '../lib/execution.js';
@@ -289,6 +290,59 @@ describe('dispatchLocal', () => {
 });
 
 // ============================================================
+// AF-FIX-A2: CLI default model must not clobber a local agent's model
+// ============================================================
+
+describe('applyCliDefaultModel', () => {
+  it('per-agent execution.model wins for backend:local (CLI default ignored)', () => {
+    const cfg: ExecutionConfig = { backend: 'local', model: 'llama3.1:70b', toolCalling: 'prompt' };
+    assert.equal(applyCliDefaultModel(cfg, 'sonnet'), 'llama3.1:70b');
+  });
+
+  it('applies the CLI default for local when no execution.model was specified', () => {
+    const cfg: ExecutionConfig = { backend: 'local', toolCalling: 'prompt' };
+    assert.equal(applyCliDefaultModel(cfg, 'llama3.1'), 'llama3.1');
+  });
+
+  it('applies the CLI default for the claude backend (overrides frontmatter)', () => {
+    const cfg: ExecutionConfig = { backend: 'claude', model: 'claude-old', toolCalling: 'native' };
+    assert.equal(applyCliDefaultModel(cfg, 'sonnet'), 'sonnet');
+  });
+
+  it('keeps the existing model when there is no CLI default', () => {
+    const cfg: ExecutionConfig = { backend: 'local', model: 'mistral', toolCalling: 'prompt' };
+    assert.equal(applyCliDefaultModel(cfg, undefined), 'mistral');
+  });
+});
+
+// ============================================================
+// AF-FIX-A5: dispatchLocal honors the caller-supplied timeout budget
+// ============================================================
+
+describe('dispatchLocal timeout', () => {
+  it('aborts the request when it exceeds the supplied timeoutMs', async () => {
+    // A fetch that respects the abort signal and never resolves on its own.
+    const hangingFetch = ((_url: any, init?: any) =>
+      new Promise((_resolve, reject) => {
+        const signal: AbortSignal | undefined = init?.signal;
+        signal?.addEventListener('abort', () =>
+          reject(new DOMException('Aborted', 'AbortError')),
+        );
+      })) as unknown as typeof fetch;
+
+    const cfg: ExecutionConfig = {
+      backend: 'local',
+      endpoint: 'http://localhost:11434',
+      toolCalling: 'prompt',
+    };
+    await assert.rejects(
+      dispatchLocal(cfg, { systemPrompt: 's', taskPrompt: 't', fetchImpl: hangingFetch, timeoutMs: 10 }),
+      (err: any) => err?.name === 'AbortError',
+    );
+  });
+});
+
+// ============================================================
 // dispatchAgent — router routes local without touching Claude SDK
 // ============================================================
 
@@ -314,5 +368,52 @@ describe('dispatchAgent', () => {
     assert.equal(res.backend, 'local');
     assert.equal(res.output, 'routed local');
     assert.deepEqual(res.usage, { inputTokens: 1, outputTokens: 1 });
+    // AF-FIX-A1: non-empty local output is a success.
+    assert.equal(res.success, true);
+  });
+
+  // AF-FIX-A1: empty local output is surfaced as a failure, not a false success.
+  it('reports success:false when a local backend returns empty output', async () => {
+    const fakeFetch = (async () =>
+      jsonResponse({
+        message: { content: '' },
+        prompt_eval_count: 5,
+        eval_count: 0,
+      })) as unknown as typeof fetch;
+
+    const cfg: ExecutionConfig = {
+      backend: 'local',
+      endpoint: 'http://127.0.0.1:11434',
+      toolCalling: 'prompt',
+    };
+    const res = await dispatchAgent(cfg, {
+      systemPrompt: 's',
+      taskPrompt: 't',
+      fetchImpl: fakeFetch,
+    });
+    assert.equal(res.success, false);
+    assert.equal(res.output, '');
+  });
+});
+
+// ============================================================
+// AF-FIX-A1: dispatchLocal surfaces real success (non-empty output)
+// ============================================================
+
+describe('dispatchLocal success', () => {
+  it('success:true for non-empty Ollama output', async () => {
+    const fakeFetch = (async () =>
+      jsonResponse({ message: { content: 'hi' }, prompt_eval_count: 1, eval_count: 1 })) as unknown as typeof fetch;
+    const cfg: ExecutionConfig = { backend: 'local', endpoint: 'http://localhost:11434', toolCalling: 'prompt' };
+    const res = await dispatchLocal(cfg, { systemPrompt: 's', taskPrompt: 't', fetchImpl: fakeFetch });
+    assert.equal(res.success, true);
+  });
+
+  it('success:false for whitespace-only vLLM output', async () => {
+    const fakeFetch = (async () =>
+      jsonResponse({ choices: [{ message: { content: '   ' } }], usage: { prompt_tokens: 1, completion_tokens: 0 } })) as unknown as typeof fetch;
+    const cfg: ExecutionConfig = { backend: 'local', endpoint: 'http://localhost:8000/v1', toolCalling: 'native' };
+    const res = await dispatchLocal(cfg, { systemPrompt: 's', taskPrompt: 't', fetchImpl: fakeFetch });
+    assert.equal(res.success, false);
   });
 });

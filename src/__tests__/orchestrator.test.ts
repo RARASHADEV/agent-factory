@@ -152,6 +152,46 @@ describe('Orchestrator.run — input validation (§6.1)', () => {
 });
 
 // ============================================================
+// AF-FIX-A6: backend is threaded from the executor into each step
+// ============================================================
+
+describe('Step backend threading (AF-FIX-A6)', () => {
+  it('records the backend the executor reported per step', async () => {
+    const stub = new StubExecutor({
+      results: {
+        researcher: { output: 'r', usage: usage(1, 1), backend: 'local' },
+        reviewer: { output: { approved: true }, usage: usage(1, 1), backend: 'claude' },
+      },
+    });
+    const planner = scriptedPlanner([
+      { done: false, calls: [{ agent: 'researcher' }] },
+      { done: true },
+    ]);
+    const orch = new Orchestrator(stub);
+    const result = await orch.run('marketing', 'go', { config: config(), planner });
+
+    const researcherStep = result.steps.find((s) => s.agent === 'researcher');
+    const reviewerStep = result.steps.find((s) => s.agent === 'reviewer');
+    assert.equal(researcherStep?.backend, 'local');
+    assert.equal(reviewerStep?.backend, 'claude');
+  });
+
+  it('falls back to "unknown" when the executor reports no backend', async () => {
+    const stub = new StubExecutor({ fallback: { output: 'r', usage: usage(1, 1) } });
+    const planner = scriptedPlanner([
+      { done: false, calls: [{ agent: 'researcher' }] },
+      { done: true },
+    ]);
+    const orch = new Orchestrator(stub);
+    const result = await orch.run('marketing', 'go', {
+      config: config({ required_finalizers: [] }),
+      planner,
+    });
+    assert.equal(result.steps[0].backend, 'unknown');
+  });
+});
+
+// ============================================================
 // Guardrail: max_delegations
 // ============================================================
 
