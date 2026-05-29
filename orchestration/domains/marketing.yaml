@@ -10,7 +10,6 @@ roster:
   - researcher
   - product-analyst
   - content-writer
-  - ghostwriter
   - qa
 policy:
   max_delegations: 12        # max total agent calls (length)
