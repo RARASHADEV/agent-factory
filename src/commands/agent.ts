@@ -22,6 +22,13 @@ export interface AgentMeta {
   disallowedTools?: string[];
   tools?: string[];
   synced?: string;
+  /** AF-42: per-agent execution routing (backend/model/endpoint/toolCalling). */
+  execution?: {
+    backend?: string;
+    model?: string;
+    endpoint?: string;
+    toolCalling?: string;
+  };
   [key: string]: unknown;
 }
 
@@ -282,6 +289,7 @@ export async function agentSpawnCommand(slug: string, options: SpawnOptions): Pr
       ticket,
       agentSlug: slug,
       afPath: join(cwd, '.af'),
+      execution: agent.meta.execution,   // AF-42: per-agent backend routing
     };
 
     const configFile = join(outputDir, 'config.json');
@@ -426,6 +434,7 @@ export async function agentSpawnCommand(slug: string, options: SpawnOptions): Pr
       ticket: task.ticket,
       agentSlug: slug,
       afPath,
+      execution: agent.meta.execution,   // AF-42: per-agent backend routing
     };
 
     // Write config to temp file

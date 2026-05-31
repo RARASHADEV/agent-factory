@@ -22,6 +22,8 @@ export interface AgentResult {
   durationMs: number;
   numTurns: number;
   success: boolean;
+  /** AF-42/AF-45: normalized token usage reported by the backend. */
+  usage?: { inputTokens: number; outputTokens: number };
 }
 
 /**
@@ -57,6 +59,8 @@ export async function runAgent(
   let durationMs = 0;
   let numTurns = 0;
   let success = false;
+  let inputTokens = 0;   // AF-42/AF-45: normalized usage
+  let outputTokens = 0;
 
   for await (const event of stream) {
     // ORA-163: Capture text from intermediate assistant turns (multi-turn tool use).
@@ -76,6 +80,11 @@ export async function runAgent(
       durationMs = r.duration_ms || 0;
       numTurns = r.num_turns || 0;
       success = r.subtype === 'success';
+      // AF-42/AF-45: Claude SDK reports usage.input_tokens / output_tokens.
+      if (r.usage) {
+        inputTokens = r.usage.input_tokens ?? 0;
+        outputTokens = r.usage.output_tokens ?? 0;
+      }
     }
   }
 
@@ -85,5 +94,11 @@ export async function runAgent(
     console.warn(`[sdk] result event empty but assistant turns produced ${allText.length} chars — using fallback`);
   }
 
-  return { result: finalText, durationMs, numTurns, success };
+  return {
+    result: finalText,
+    durationMs,
+    numTurns,
+    success,
+    usage: { inputTokens, outputTokens },
+  };
 }
