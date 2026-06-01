@@ -4,7 +4,11 @@
 # resolve to a real agents/<slug>.md file (validated by the loader, §6.1).
 domain: marketing
 supervisor:
-  agent: workflow-manager
+  # AF-48 follow-up: a dedicated supervisor whose prompt emits parseable
+  # {done}/{calls} JSON decisions (the generic workflow-manager did not, so every
+  # turn parsed to "done" and nothing delegated). Claude-backed → needs only
+  # ENABLE_AF_48 for a live run (design §10).
+  agent: orchestration-supervisor
   goal: Turn a campaign objective into reviewed, publish-ready assets
 roster:
   - researcher

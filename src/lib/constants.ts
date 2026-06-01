@@ -79,6 +79,15 @@ export const ENABLE_AF_34 = true;
 export const ENABLE_AF_42 = true;
 
 /**
+ * AF-48: `af orchestrate` command. When false, the command prints a friendly
+ * "not enabled" message and exits 0. Gates only the user-facing command — the
+ * orchestration engine/library code (AF-42/45/46) is already merged and tested
+ * and is NOT gated. Default off until verified against a real local model + a
+ * supervisor that emits parseable decisions (design §10).
+ */
+export const ENABLE_AF_48 = false;
+
+/**
  * AF-42 (§8 SSRF guard): allow-list of hosts a local `execution.endpoint` may
  * target. Operator-set agent files could otherwise point the dispatcher at an
  * arbitrary internal service. Entries are matched case-insensitively; a leading

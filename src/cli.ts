@@ -19,6 +19,7 @@ import {
   agentSpawnCommand,
   agentStatusCommand,
 } from './commands/agent.js';
+import { orchestrateCommand } from './commands/orchestrate.js';
 import { syncCommand } from './commands/sync.js';
 import { webhookServeCommand } from './commands/webhook.js';
 import {
@@ -186,6 +187,18 @@ pipeline
   .description('Resume a paused pipeline from the next pending phase')
   .option('-p, --project <prefix>', 'Project prefix')
   .action(pipelineResumeCommand);
+
+// --- Orchestrate command (AF-48) ---
+
+program
+  .command('orchestrate <domain> <objective>')
+  .description('Run a domain orchestration (supervisor + roster) end-to-end')
+  .option('--dry-run', 'Log the plan without dispatching any agent')
+  .option('--max-delegations <n>', 'Override the domain policy max_delegations')
+  .option('--domains-dir <path>', 'Override the orchestration/domains directory')
+  .option('--json', 'Emit the raw OrchestrationResult as JSON')
+  .option('-p, --project <prefix>', 'Project prefix')
+  .action(orchestrateCommand);
 
 // --- Sync command (AF-12) ---
 
