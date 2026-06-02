@@ -22,6 +22,7 @@ import {
   createOrchestrator,
   type OrchestrationResult,
 } from '../lib/orchestrator.js';
+import { persistOrchestrationResult } from '../lib/orchestration-output.js';
 import { heading, dim } from '../lib/format.js';
 
 export interface OrchestrateOptions {
@@ -71,12 +72,32 @@ export async function orchestrateCommand(
       logger: (line) => console.log(dim(line)),
     });
 
-    if (options.json) {
-      console.log(JSON.stringify(result, null, 2));
-      return;
+    // AF-50: structural persistence — always on for real runs. The block sits
+    // inside the same try so a thrown error from run() still hits the §6 handler.
+    let outputDir: string | undefined;
+    if (!result.dryRun) {
+      try {
+        outputDir = persistOrchestrationResult(result, { cwd: process.cwd() });
+      } catch (writeErr) {
+        // Never lose the output: fall back to stdout, flag the failure.
+        const msg = writeErr instanceof Error ? writeErr.message : String(writeErr);
+        console.error(chalk.red(`Failed to persist orchestration output: ${msg}`));
+        console.error(chalk.yellow('Dumping full result to stdout so it is not lost:'));
+        console.log(JSON.stringify(result, null, 2));
+        process.exitCode = 1;
+      }
     }
 
-    renderReport(result);
+    if (options.json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      renderReport(result);
+    }
+
+    if (outputDir) {
+      console.log('');
+      console.log(dim(`output saved to ${outputDir}`));
+    }
   } catch (err) {
     // §6: surface a readable message, no stack trace. OrchestrationInputError /
     // DomainConfigError both carry an `errors` list — print it when present.
