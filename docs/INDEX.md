@@ -7,7 +7,5 @@
 - `designs/` — Task-level design documents (one per ticket, e.g. `designs/AF-53-service.md` — AF Service / `af serve` over authenticated HTTP).
 
 ## Research
-- `research-agent-native-linux-distro.md` — Landscape and feasibility of an agent-native Linux UI/distro for personal computing.
-- `research-european-rental-investment-property.md` — European tourist-rental investment analysis (≤€250k budget, NL buyer): markets, yields, and top risk-adjusted-ROI recommendations.
-- `research-local-model-worker-opencode.md` — Research + plan for adding a local-model worker (Ollama on Hanuman via OpenCode) alongside the Claude SDK path. Not yet implemented.
-- `research-microsoft-copilot-as-agent.md` — Assessment of Microsoft Copilot as an autonomous agent within an organization.
+General research reports were moved out to the dedicated **`random research` (RR)** project (`~/projects/random-research/docs/`), tracked on the Loka board as RR-1…RR-4:
+- Agent-native Linux UI/distro (RR-1), European rental investment property (RR-2), Local model worker via OpenCode (RR-3), Microsoft Copilot as an organizational agent (RR-4).
