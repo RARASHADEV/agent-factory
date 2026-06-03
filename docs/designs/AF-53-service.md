@@ -120,7 +120,7 @@ Execution still runs through existing machinery (`spawn-runner.js` / `dispatchAg
 
 `project` is **required** on every route that touches a workspace (all execution + most query/mutation). A request with a missing or unresolvable project is rejected **`400 { error: "unknown project '<x>'" }` before anything is enqueued or executed** — never guessed. `project` must resolve against AF's registry (`af projects`). This is what makes "which repo does this run in?" a hard precondition system-wide and determines `outputDir`.
 
-## 7. Data Model — SQLite job registry (Decision 2)
+## 7. Data Model — durable job registry (Decision 2; storage revised by Decision 7 / §14 R1)
 
 ```sql
 CREATE TABLE dispatch_jobs (
@@ -139,22 +139,29 @@ CREATE TABLE dispatch_jobs (
   result        TEXT
 );
 ```
-**Reconcile on boot:** re-queue rows still `queued`; mark any `running` rows (orphaned by the restart) `failed` so they can be re-dispatched. Jobs survive `af serve` restarts; none silently lost. Use `better-sqlite3` (already an AF/Loka dependency).
+**Reconcile on boot:** re-queue rows still `queued`; mark any `running` rows (orphaned by the restart) `failed` so they can be re-dispatched. Jobs survive `af serve` restarts; none silently lost.
+
+> **Storage (corrected — see §14, Review Finding R1).** The SQL above is the *logical record shape*, not a mandate to add a SQL engine. `better-sqlite3` is **not** a current AF dependency, and project.md states *"No database, no external API deps for core CLI."* Resolution (**Decision 7**): use a **single-process, file-backed durable registry** at `AF_SERVICE_DB` (default `~/.af/service.json`) — an in-memory map hydrated on boot, persisted with atomic temp-file + `rename` writes (the same atomicity AF already uses for task/pipeline state). The service is single-process and owns the only writer, so there is no multi-writer contention; the dataset is tiny (cap 20 concurrent + ≤30-day history, §Decision 10). The columns above become the JSON record fields verbatim. *Acceptable alternative if richer querying is later needed:* Node's built-in `node:sqlite` (Node ≥ 22) — still no external/native dependency. Do **not** add `better-sqlite3`.
 
 ## 8. Configuration
 
+All keys live under a new `service` block in `GlobalConfig` (mirroring the existing `loka.webhook` block in `src/lib/config.ts`); env vars override config.
+
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `AF_SERVICE_PORT` | TBD (distinct from webhook's 4100) | Listen port |
-| `AF_SERVICE_BIND` | Tailscale iface (never `0.0.0.0`) | Bind address |
+| `AF_SERVICE_PORT` | `4150` (Decision 4 — distinct from webhook's 4100) | Listen port |
+| `AF_SERVICE_BIND` | Tailscale IPv4 resolved at boot via `tailscale ip -4` (Decision 4) | Bind address — **never** `0.0.0.0` |
+| `AF_SERVICE_ALLOW_PUBLIC` | `false` | Escape hatch; if false (default) and bind would resolve to `0.0.0.0`/a public iface, **fail to start** |
 | `AF_MAX_CONCURRENCY` | `20` | Global worker cap (Decision 1) |
-| `AF_SERVICE_DB` | `~/.af/service.db` | SQLite registry path |
+| `AF_MAX_QUEUE_DEPTH` | `500` (Decision 6) | Backstop ceiling; beyond it `POST /jobs` → `429` |
+| `AF_SERVICE_RETENTION_DAYS` | `30` (Decision 10) | Prune terminal job rows older than this |
+| `AF_SERVICE_DB` | `~/.af/service.json` | File-backed registry path (Decision 7 — not SQLite) |
 | `AF_SERVICE_SECRET` | — (required) | Bearer shared secret |
 | `ENABLE_AF_53` | `false` | Feature flag for the whole service |
 
 ## 9. Security
 
-- **Auth on every route** — Bearer shared secret; reject unauthenticated. Mirror ORA-119 `checkAuth`.
+- **Auth on every route** — Bearer shared secret; reject unauthenticated. Mirror ORA-119 `checkAuth`, and compare the secret with `crypto.timingSafeEqual` (the same constant-time pattern `src/lib/webhook-handler.ts` already uses for HMAC) — never `===`.
 - **Bind to Tailscale only** — never a public interface.
 - **Sensitive ops** — `init`, `sync`, and all mutations are powerful; same auth, logged. Consider a per-client capability split later (§12).
 - **No generic exec** — resource routes only; no arbitrary command passthrough.
@@ -173,12 +180,15 @@ CREATE TABLE dispatch_jobs (
 - **Stage A — Execution plane**: **ENGINEER**. `af serve` skeleton, auth, `/jobs` + global queue + SQLite registry + reconcile + callbacks + `/health`. Complexity **Medium**. Unblocks ORA-160 Phase 2.
 - **Stage B — Full surface**: **ENGINEER**. Core-function refactor + query/mutation routes. Complexity **Medium** (breadth, mostly mechanical once refactor exists). May involve **FRONTEND_ENGINEER** only if the `web/` dashboard is later pointed at the API (out of scope here).
 
-## 12. Open Decisions
+## 12. Resolved Decisions
 
-- **Port + bind address** for `af serve`.
-- **Capability split** — do all authed clients get the full surface (including `init`/`sync`/mutations), or do remote clones get a reduced set vs local ORA? Default: full surface to all authed clients (per "all commands available to ORA and others"); revisit if least-privilege is wanted.
-- **Queue overflow** — return `queuePosition` and let callers wait (recommended) vs `429` above a depth bound.
-- **Registry retention** — how long to keep terminal `dispatch_jobs` rows (history vs pruning).
+> Resolved by Architect on 2026-06-03 (review session). All four prior open items are now decided; numbering continues the design's `Decision N` convention.
+
+- **Decision 4 — Port + bind address.** Port **`4150`** (`AF_SERVICE_PORT`), distinct from webhook's 4100, same `41xx` family. Bind to the host's **Tailscale IPv4** resolved at boot (`tailscale ip -4`), configurable via `AF_SERVICE_BIND`. The service **refuses to start** if the bind would resolve to `0.0.0.0` or a public interface unless `AF_SERVICE_ALLOW_PUBLIC=true` is explicitly set (discouraged). This also corrects the precedent in `webhook serve`, which binds `0.0.0.0` — do **not** copy that.
+- **Decision 5 — Capability split.** **Full surface to every authenticated client in v1**, single shared secret. Rationale: the trust boundary is the Tailscale mesh + bearer secret, and all consumers (ORA + ORA-clones) are first-party. Per-client least-privilege (scoped capability tokens, reduced surface for remote clones) is deferred to a **follow-up ticket**, not v1. Mitigation now: every mutation and every `init`/`sync` call is written to the existing audit bridge (`src/lib/audit.ts` / `audit-bridge.ts`) so sensitive ops are attributable.
+- **Decision 6 — Queue overflow.** **Enqueue and return `queuePosition`** (the recommended path) — async dispatch + completion callbacks mean callers never block, so deep queues are acceptable. Add a runaway/abuse backstop: if queue depth exceeds **`AF_MAX_QUEUE_DEPTH` (default 500)**, `POST /jobs` returns **`429 { error, retryAfter }`** and enqueues nothing. The 429 protects the box; it is not the normal flow.
+- **Decision 7 — Registry technology** (review finding R1, see §14). **File-backed durable registry**, not SQLite — see §7 storage note. No new dependency; honors project.md's "no database" rule.
+- **Decision 10 — Registry retention.** Keep terminal rows for **30 days** (`AF_SERVICE_RETENTION_DAYS`), then prune on a **boot-time + daily sweep**. Loka task comments remain the durable system of record (Decision/§5.2); the local registry is operational state for restart-survival and recent history, so 30 days is ample and keeps the file small.
 
 ## 13. Test Plan (acceptance)
 
@@ -190,3 +200,24 @@ CREATE TABLE dispatch_jobs (
 6. **Query plane is unqueued** — `GET /projects` returns immediately while 20 jobs run.
 7. **Parity** — a representative query/mutation route returns the same data the equivalent `af` CLI command produces (proving the shared core function).
 8. **Loka agreement** — `/jobs/:id` outcome matches the Loka task comment for that ticket.
+
+Add for the resolved decisions:
+9. **Bind safety (Decision 4)** — with no Tailscale iface resolvable and `AF_SERVICE_ALLOW_PUBLIC` unset, `af serve` exits non-zero and binds nothing (never falls back to `0.0.0.0`).
+10. **Queue backstop (Decision 6)** — with depth at `AF_MAX_QUEUE_DEPTH`, the next `POST /jobs` → `429`, enqueues nothing, and in-flight jobs are unaffected.
+11. **Retention prune (Decision 10)** — a terminal row older than `AF_SERVICE_RETENTION_DAYS` is removed on the boot/daily sweep; younger rows and non-terminal rows survive.
+
+## 14. Design Review (2026-06-03)
+
+Verdict: **the design is sound and approved for implementation** — central-not-federated, two-plane split, one-engine/thin-adapters, and the project-required guardrail are all the right calls and are grounded in code that already exists (`dispatchAgent`, `spawn-runner.ts`, `orchestrator.ts`, `pipeline.ts`, the `http.createServer` + `timingSafeEqual` patterns in `webhook`). No re-architecture needed. Findings below are corrections folded into the sections above, not blockers.
+
+- **R1 — Storage claim was wrong (resolved, Decision 7).** §7 asserted `better-sqlite3` is "already an AF/Loka dependency." It is **not** in `package.json` (deps: SDK, chalk, cli-table3, commander, gray-matter, yaml only), and project.md mandates *"No database, no external API deps for core CLI."* Adding a native module also complicates the systemd deploy on Hanuman. → Switched to a single-process file-backed registry (atomic temp+rename), `node:sqlite` as the only acceptable fallback. The §7 SQL is retained as the logical record shape.
+- **R2 — Bind precedent is unsafe (resolved, Decision 4).** The existing `webhook serve` binds `0.0.0.0` (`src/commands/webhook.ts:82`). The engineer must **not** mirror that; bind to the tailnet IP and fail-closed otherwise.
+- **R3 — Branch base mismatch (RESOLVED 2026-06-03, commit `405f28a`).** `project.md` said base branch `main`; corrected to `master` (matches repo default, `CLAUDE.md`, and `--base master` PRs). Base branch is **`master`**.
+- **R4 — `ENABLE_AF_48` precondition (RESOLVED 2026-06-03, commit `95b6e12`).** `ENABLE_AF_48 = true` is now committed to `master` (AF-48 is released). Stage A may rely on `dispatchAgent`/`orchestrate` being enabled; no longer a precondition to clear.
+- **R5 — Auth comparison (folded into §9).** Use `crypto.timingSafeEqual` for the bearer check, matching the HMAC comparison already in `webhook-handler.ts`.
+
+### Feature Flag Specification
+- **Flag:** `ENABLE_AF_53` — add to `src/lib/constants.ts` (follow the existing `ENABLE_AF_XX` pattern/comment style).
+- **Default:** `false` (off).
+- **Guards:** the entire `af serve` command and every route handler. With the flag off, `af serve` prints a "disabled" notice and exits 0; no listener is opened. The flag is checked once at command entry (mirror how `webhook` checks `ENABLE_AF_12`).
+- **Removal:** flip to `true` only after Stage A acceptance tests 1–6 + 9–11 pass on Hanuman behind the tailnet.
