@@ -21,7 +21,7 @@ CLI tool for spawning and managing AI agents across projects.
 ## Way of Working
 
 ### Git
-- Base branch: `main`
+- Base branch: `master`
 - Branch pattern: `engineer/<TICKET>`
 
 ### Design Documents
@@ -35,7 +35,7 @@ CLI tool for spawning and managing AI agents across projects.
 
 ### Finishing
 - Commit: `AF-XX: description`
-- Push branch and create PR: `gh pr create --base main`
+- Push branch and create PR: `gh pr create --base master`
 - Move task to `ready-for-qa`
 - Log completion in the task's `## Log` section
 
