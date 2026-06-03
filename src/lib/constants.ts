@@ -82,10 +82,11 @@ export const ENABLE_AF_42 = true;
  * AF-48: `af orchestrate` command. When false, the command prints a friendly
  * "not enabled" message and exits 0. Gates only the user-facing command — the
  * orchestration engine/library code (AF-42/45/46) is already merged and tested
- * and is NOT gated. Default off until verified against a real local model + a
- * supervisor that emits parseable decisions (design §10).
+ * and is NOT gated. Enabled: AF-48 is released (verified against a real local
+ * model + a supervisor emitting parseable decisions); AF-53 Stage A depends on
+ * this being on.
  */
-export const ENABLE_AF_48 = false;
+export const ENABLE_AF_48 = true;
 
 /**
  * AF-42 (§8 SSRF guard): allow-list of hosts a local `execution.endpoint` may
