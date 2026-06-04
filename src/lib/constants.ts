@@ -89,6 +89,27 @@ export const ENABLE_AF_42 = true;
 export const ENABLE_AF_48 = true;
 
 /**
+ * AF-53: `af serve` HTTP service. When false, the command prints a "disabled"
+ * notice, exits 0, and opens no listener. Checked once at command entry, mirroring
+ * how `webhook` checks ENABLE_AF_12. Gates the whole service (and, later, every route).
+ * Flip to true only after Stage A acceptance tests pass on Hanuman behind the tailnet.
+ */
+export const ENABLE_AF_53 = false;
+
+/**
+ * AF-53 (§8): default global worker concurrency cap for the `af serve` queue.
+ * The queue itself lands in a later ticket; `/health` reports this as `capacity`.
+ * Overridable via the AF_MAX_CONCURRENCY env var / `service.maxConcurrency` config.
+ */
+export const AF_MAX_CONCURRENCY_DEFAULT = 20;
+
+/** AF-53 (§8, Decision 4): default listen port — distinct from webhook's 4100. */
+export const AF_SERVICE_PORT_DEFAULT = 4150;
+
+/** AF-53 (§8, Decision 7): default SQLite database path (jobs + audit journal). */
+export const AF_SERVICE_DB_DEFAULT = join(GLOBAL_DIR, 'service.db');
+
+/**
  * AF-42 (§8 SSRF guard): allow-list of hosts a local `execution.endpoint` may
  * target. Operator-set agent files could otherwise point the dispatcher at an
  * arbitrary internal service. Entries are matched case-insensitively; a leading

@@ -22,6 +22,7 @@ import {
 import { orchestrateCommand } from './commands/orchestrate.js';
 import { syncCommand } from './commands/sync.js';
 import { webhookServeCommand } from './commands/webhook.js';
+import { serveCommand } from './commands/serve.js';
 import {
   pipelineRunCommand,
   pipelineListCommand,
@@ -230,6 +231,20 @@ webhook
       port: opts.port ? parseInt(opts.port, 10) : undefined,
       project: opts.project,
       verbose: opts.verbose ?? false,
+    });
+  });
+
+// --- Service command (AF-53) ---
+
+program
+  .command('serve')
+  .description('Start the AF HTTP service (authenticated, tailnet-bound)')
+  .option('-p, --port <port>', 'Port to listen on (default: 4150)')
+  .option('--bind <address>', 'Bind address (default: Tailscale IPv4)')
+  .action(async (opts) => {
+    await serveCommand({
+      port: opts.port ? parseInt(opts.port, 10) : undefined,
+      bind: opts.bind,
     });
   });
 

@@ -31,6 +31,36 @@ export interface LokaConfig {
   };
 }
 
+/**
+ * AF-53: `af serve` HTTP service configuration (design §8).
+ * Mirrors the `loka.webhook` block. Env vars override these values at boot
+ * (AF_SERVICE_PORT, AF_SERVICE_BIND, AF_SERVICE_ALLOW_PUBLIC, AF_MAX_CONCURRENCY,
+ * AF_SERVICE_SECRET, AF_SERVICE_DB). `secret` is required to start the service.
+ */
+export interface ServiceConfig {
+  /** Bearer shared secret. Required to start; env AF_SERVICE_SECRET overrides. */
+  secret?: string;
+  /** Listen port. Default 4150 (Decision 4); env AF_SERVICE_PORT overrides. */
+  port?: number;
+  /**
+   * Bind address. Defaults to the host Tailscale IPv4 resolved at boot
+   * (`tailscale ip -4`); env AF_SERVICE_BIND overrides. Never 0.0.0.0.
+   */
+  bind?: string;
+  /**
+   * Escape hatch. When false (default), the service refuses to start if the
+   * bind would resolve to 0.0.0.0 or a public interface; env AF_SERVICE_ALLOW_PUBLIC.
+   */
+  allowPublic?: boolean;
+  /** Global worker concurrency cap. Default 20; env AF_MAX_CONCURRENCY overrides. */
+  maxConcurrency?: number;
+  /**
+   * SQLite database path (jobs + audit journal; built in a later ticket).
+   * Default ~/.af/service.db; env AF_SERVICE_DB overrides.
+   */
+  db?: string;
+}
+
 export interface GlobalConfig {
   defaults: {
     model: string;
@@ -51,6 +81,8 @@ export interface GlobalConfig {
   };
   /** Loka backend configuration (required when defaults.taskBackend = "loka") */
   loka?: LokaConfig;
+  /** AF-53: `af serve` HTTP service configuration (design §8) */
+  service?: ServiceConfig;
 }
 
 const DEFAULT_CONFIG: GlobalConfig = {
