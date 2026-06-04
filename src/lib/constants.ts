@@ -94,7 +94,7 @@ export const ENABLE_AF_48 = true;
  * how `webhook` checks ENABLE_AF_12. Gates the whole service (and, later, every route).
  * Flip to true only after Stage A acceptance tests pass on Hanuman behind the tailnet.
  */
-export const ENABLE_AF_53 = false;
+export const ENABLE_AF_53 = true; // AF-61: enabled on Hanuman after acceptance
 
 /**
  * AF-53 (§8): default global worker concurrency cap for the `af serve` queue.

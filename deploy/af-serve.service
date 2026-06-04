@@ -1,0 +1,26 @@
+# AF-53 — Agent Factory HTTP service (af serve). Reference unit for Hanuman.
+# Install: sudo cp deploy/af-serve.service /etc/systemd/system/ && sudo systemctl daemon-reload
+#          sudo systemctl enable --now af-serve.service
+# NOTE: ExecStart node path is environment-specific (nvm here). Adjust to `which node` (Node >= 22 required for node:sqlite).
+# Secrets/config live in /home/vanara/.af/service.env (chmod 600, NOT committed).
+[Unit]
+Description=Agent Factory HTTP service (af serve) — AF-53
+Documentation=file:///home/vanara/projects/agent-factory/docs/designs/AF-53-service.md
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vanara
+Group=vanara
+WorkingDirectory=/home/vanara/projects/agent-factory
+EnvironmentFile=/home/vanara/.af/service.env
+Environment=HOME=/home/vanara
+# Environment=PATH=<login PATH incl. node bin so spawned agents find their tools>
+ExecStart=/home/vanara/.nvm/versions/node/v22.22.1/bin/node /home/vanara/projects/agent-factory/dist/cli.js serve
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target
