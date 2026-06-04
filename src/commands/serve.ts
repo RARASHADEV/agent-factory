@@ -26,9 +26,26 @@ import { error } from '../lib/format.js';
 import { ProjectNotFoundError } from '../lib/core/errors.js';
 import { listProjectsSummary } from '../lib/core/projects.js';
 import { getProjectStatus } from '../lib/core/status.js';
-import { listTasks, showTask } from '../lib/core/tasks.js';
+import {
+  listTasks,
+  showTask,
+  createTask,
+  moveTask,
+  assignTask,
+  logTask,
+} from '../lib/core/tasks.js';
 import { listAgents, showAgent } from '../lib/core/agents.js';
 import { listPipelineRuns, getPipelineRun } from '../lib/core/pipelines.js';
+import { initProject, WorkspaceExistsError } from '../lib/core/init.js';
+import { syncProject, SyncNotConfiguredError } from '../lib/core/sync.js';
+import {
+  syncAgents,
+  AgentSyncNotConfiguredError,
+  AgentSyncError,
+} from '../lib/core/agent-sync.js';
+import { takeBufferedBody } from '../lib/service-audit.js';
+import { TaskNotFoundError, ValidationError } from '../lib/task-provider.js';
+import type { TaskCreateInput } from '../lib/task-provider.js';
 
 export interface ServeOptions {
   port?: number;
@@ -296,6 +313,193 @@ export function matchQueryRoute(method: string, path: string): RouteHandler | un
   return undefined;
 }
 
+// ── Mutation plane (AF-60: writes · synchronous · NEVER queued) ──────────────
+//
+// Each handler is a thin adapter over an AF-58 core write op (createTask/moveTask/
+// assignTask/logTask) or an AF-60 core maintenance op (initProject/syncProject/
+// syncAgents). It parses + validates the body, calls the core op, and serializes
+// the result as JSON. NO business logic lives here (design §3.1 invariant). These
+// routes are synchronous: they never touch the job queue (§1 — mutations are not
+// queued). They are mounted through `mount` so they inherit auth (401) + audit.
+//
+// Error mapping:
+//   ProjectNotFoundError    → 400 (unknown project rejected, §6 guardrail)
+//   WorkspaceExistsError    → 400 (duplicate init)
+//   Sync/AgentSync-not-configured → 400
+//   TaskNotFoundError       → 404 (unknown ticket)
+//   ValidationError / bad body → 400
+//   AgentSyncError (upstream) → 502
+//   anything else           → bubbles to dispatch's 500
+
+/** Pull the body the audit middleware already buffered (the stream is read once). */
+function bodyOf(req: IncomingMessage): Record<string, unknown> {
+  return takeBufferedBody(req) ?? {};
+}
+
+/**
+ * Run a mutation handler, mapping core-op errors to HTTP status codes. Keeps the
+ * per-handler bodies focused on the happy path; all error→status mapping is here.
+ */
+async function runMutation(
+  res: ServerResponse,
+  fn: () => Promise<void> | void,
+): Promise<void> {
+  try {
+    await fn();
+  } catch (err) {
+    if (err instanceof ProjectNotFoundError) {
+      sendJson(res, 400, { ok: false, error: err.message });
+      return;
+    }
+    if (err instanceof WorkspaceExistsError) {
+      sendJson(res, 400, { ok: false, error: err.message });
+      return;
+    }
+    if (err instanceof SyncNotConfiguredError || err instanceof AgentSyncNotConfiguredError) {
+      sendJson(res, 400, { ok: false, error: err.message });
+      return;
+    }
+    if (err instanceof TaskNotFoundError) {
+      sendJson(res, 404, { ok: false, error: err.message });
+      return;
+    }
+    if (err instanceof ValidationError) {
+      sendJson(res, 400, { ok: false, error: err.message });
+      return;
+    }
+    if (err instanceof AgentSyncError) {
+      sendJson(res, 502, { ok: false, error: err.message });
+      return;
+    }
+    throw err;
+  }
+}
+
+/** POST /projects { prefix, name? } → init a workspace (mirrors `af init`). */
+const mutateInitProject: RouteHandler = (req, res) =>
+  runMutation(res, async () => {
+    const body = bodyOf(req);
+    const prefix = typeof body.prefix === 'string' ? body.prefix.trim() : '';
+    if (!prefix) {
+      sendJson(res, 400, { ok: false, error: 'prefix is required' });
+      return;
+    }
+    const name = typeof body.name === 'string' ? body.name : undefined;
+    // projectDir is taken from `path` when supplied (absolute), else cwd. The HTTP
+    // service runs on Hanuman; callers pass an absolute project directory.
+    const projectDir = typeof body.path === 'string' && body.path.trim() ? body.path : undefined;
+    const data = initProject({ prefix, name, projectDir });
+    sendJson(res, 201, data as unknown as Record<string, unknown>);
+  });
+
+/** POST /projects/:p/tasks { title, … } → create a task (mirrors `af task create`). */
+function mutateCreateTask(prefix: string): RouteHandler {
+  return (req, res) =>
+    runMutation(res, async () => {
+      const body = bodyOf(req);
+      const title = typeof body.title === 'string' ? body.title.trim() : '';
+      if (!title) {
+        sendJson(res, 400, { ok: false, error: 'title is required' });
+        return;
+      }
+      const input: TaskCreateInput = { title };
+      // Optional string fields, passed through only when present + well-typed.
+      for (const k of ['type', 'priority', 'complexity', 'assignee', 'due', 'description', 'design', 'ticket'] as const) {
+        const v = body[k];
+        if (typeof v === 'string') input[k] = v;
+      }
+      if (Array.isArray(body.depends)) {
+        input.depends = (body.depends as unknown[]).filter((d): d is string => typeof d === 'string');
+      }
+      const data = await createTask(input, prefix);
+      sendJson(res, 201, data as unknown as Record<string, unknown>);
+    });
+}
+
+/**
+ * PATCH /tasks/:ticket { status? | assignee? | log? } → move/assign/log.
+ *
+ * Field dispatch: exactly ONE of `status` / `assignee` / `log` may be present.
+ *   - `status`   → moveTask(ticket, status)
+ *   - `assignee` → assignTask(ticket, assignee)
+ *   - `log`      → logTask(ticket, log)
+ * Zero fields → 400 ("one of status|assignee|log required"); more than one → 400
+ * ("exactly one of status|assignee|log per request"). This keeps each call a
+ * single, attributable mutation rather than overloading one request.
+ */
+function mutatePatchTask(ticket: string): RouteHandler {
+  return (req, res) =>
+    runMutation(res, async () => {
+      const body = bodyOf(req);
+      const status = typeof body.status === 'string' ? body.status : undefined;
+      const assignee = typeof body.assignee === 'string' ? body.assignee : undefined;
+      const log = typeof body.log === 'string' ? body.log : undefined;
+
+      const present = [status, assignee, log].filter((v) => v !== undefined).length;
+      if (present === 0) {
+        sendJson(res, 400, { ok: false, error: 'one of status|assignee|log is required' });
+        return;
+      }
+      if (present > 1) {
+        sendJson(res, 400, { ok: false, error: 'exactly one of status|assignee|log per request' });
+        return;
+      }
+
+      if (status !== undefined) {
+        const data = await moveTask(ticket, status);
+        sendJson(res, 200, data as unknown as Record<string, unknown>);
+        return;
+      }
+      if (assignee !== undefined) {
+        const data = await assignTask(ticket, assignee);
+        sendJson(res, 200, data as unknown as Record<string, unknown>);
+        return;
+      }
+      const data = await logTask(ticket, log!);
+      sendJson(res, 200, data as unknown as Record<string, unknown>);
+    });
+}
+
+/** POST /agents/sync → import agents from the upstream platform (`af agent sync`). */
+const mutateSyncAgents: RouteHandler = (req, res) =>
+  runMutation(res, async () => {
+    const body = bodyOf(req);
+    const slug = typeof body.slug === 'string' && body.slug.trim() ? body.slug : undefined;
+    const data = await syncAgents(slug);
+    sendJson(res, 200, data as unknown as Record<string, unknown>);
+  });
+
+/** POST /sync { project, mode? } → synchronize a project with Loka (`af sync`). */
+const mutateSync: RouteHandler = (req, res) =>
+  runMutation(res, async () => {
+    const body = bodyOf(req);
+    const project = typeof body.project === 'string' && body.project.trim() ? body.project : undefined;
+    const mode = typeof body.mode === 'string' ? (body.mode as 'push' | 'pull' | 'bidirectional') : undefined;
+    if (mode && mode !== 'push' && mode !== 'pull' && mode !== 'bidirectional') {
+      sendJson(res, 400, { ok: false, error: `invalid mode '${mode}' (push|pull|bidirectional)` });
+      return;
+    }
+    const data = await syncProject({ project, mode });
+    sendJson(res, 200, data as unknown as Record<string, unknown>);
+  });
+
+/**
+ * Match a dynamic (id-bearing) mutation-plane route → a bound handler, or undefined.
+ * The static mutation routes (POST /projects, POST /agents/sync, POST /sync) live in
+ * `buildRouter`; these carry a path parameter and are matched here.
+ */
+export function matchMutationRoute(method: string, path: string): RouteHandler | undefined {
+  if (method === 'POST') {
+    const m = /^\/projects\/([^/]+)\/tasks$/.exec(path);
+    if (m) return mutateCreateTask(pathParam(m[1]));
+  }
+  if (method === 'PATCH') {
+    const m = /^\/tasks\/([^/]+)$/.exec(path);
+    if (m) return mutatePatchTask(pathParam(m[1]));
+  }
+  return undefined;
+}
+
 /**
  * Compose the per-route middleware stack: audit OUTER, auth INNER. The §5.4
  * ordering needs log-first to run BEFORE auth so a rejected (401) attempt is still
@@ -333,6 +537,14 @@ export function buildRouter(jobs?: JobService, db?: ServiceDb): Map<string, Rout
   routes.set('GET /projects', mount(db, queryProjects));
   routes.set('GET /agents', mount(db, queryAgents));
   routes.set('GET /pipelines', mount(db, queryPipelines));
+
+  // Mutation plane (AF-60) — static write routes. Synchronous + unqueued: they
+  // never touch `jobs`. Mounted through `mount` for auth + audit. The id-bearing
+  // mutation routes (POST /projects/:p/tasks, PATCH /tasks/:ticket) are matched in
+  // `dispatch` via `matchMutationRoute`.
+  routes.set('POST /projects', mount(db, mutateInitProject));
+  routes.set('POST /agents/sync', mount(db, mutateSyncAgents));
+  routes.set('POST /sync', mount(db, mutateSync));
 
   if (jobs) {
     routes.set('POST /jobs', mount(db, (req, res) => jobs.handlePost(req, res)));
@@ -391,6 +603,12 @@ export async function dispatch(
   if (!handler) {
     const query = matchQueryRoute(method, path);
     if (query) handler = mount(db, query);
+  }
+  // Dynamic mutation-plane routes (AF-60) — id-bearing write routes (POST
+  // /projects/:p/tasks, PATCH /tasks/:ticket). Sync + unqueued; same auth + audit.
+  if (!handler) {
+    const mutation = matchMutationRoute(method, path);
+    if (mutation) handler = mount(db, mutation);
   }
   if (!handler) {
     // Still journal the 404 attempt (an attempt is an attempt, §5.4) — but do NOT

@@ -62,6 +62,12 @@ export const AUDIT_ROUTES: ReadonlyMap<string, RouteAuditMeta> = new Map<string,
   ['GET /projects', { plane: 'query', operation: 'projects.list' }],
   ['GET /agents', { plane: 'query', operation: 'agents.list' }],
   ['GET /pipelines', { plane: 'query', operation: 'pipelines.list' }],
+  // Mutation plane (AF-60 — synchronous writes, NEVER queued). The dynamic
+  // id-bearing routes (POST /projects/:p/tasks, PATCH /tasks/:ticket) are
+  // resolved by matchDynamicAuditMeta below.
+  ['POST /projects', { plane: 'mutation', operation: 'projects.init' }],
+  ['POST /agents/sync', { plane: 'mutation', operation: 'agents.sync' }],
+  ['POST /sync', { plane: 'mutation', operation: 'projects.sync' }],
 ]);
 
 /**
@@ -90,6 +96,16 @@ export function matchDynamicAuditMeta(method: string, path: string): RouteAuditM
   }
   if (method === 'GET' && /^\/pipelines\/[^/]+$/.test(path)) {
     return { plane: 'query', operation: 'pipelines.status' };
+  }
+  // AF-60 mutation plane — id-bearing write routes (all sync, NEVER queued).
+  if (method === 'POST' && /^\/projects\/[^/]+\/tasks$/.test(path)) {
+    return { plane: 'mutation', operation: 'tasks.create' };
+  }
+  // PATCH /tasks/:ticket multiplexes move/assign/log by body field; the precise
+  // sub-operation is not known until the handler inspects the body, so the journal
+  // records the generic 'tasks.update' (the status/result_summary still attribute it).
+  if (method === 'PATCH' && /^\/tasks\/[^/]+$/.test(path)) {
+    return { plane: 'mutation', operation: 'tasks.update' };
   }
   return undefined;
 }

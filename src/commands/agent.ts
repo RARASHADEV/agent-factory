@@ -10,6 +10,11 @@ import { createProvider } from '../lib/provider-factory.js';
 import { heading, success, error, dim } from '../lib/format.js';
 import { auditLog } from '../lib/audit.js';
 import { postActivityToLoka } from '../lib/audit-bridge.js';
+import {
+  syncAgents,
+  AgentSyncNotConfiguredError,
+  AgentSyncError,
+} from '../lib/core/agent-sync.js';
 
 export interface AgentMeta {
   slug: string;
@@ -92,122 +97,28 @@ function slugify(role: string): string {
 }
 
 export async function agentSyncCommand(slug?: string): Promise<void> {
-  const config = loadConfig();
-  const upstream = config.agents?.upstream;
-
-  if (!upstream?.url) {
-    console.log(error('No upstream URL configured in ~/.af/config.yaml'));
-    process.exit(1);
-  }
-
-  // Ensure agents directory exists
-  mkdirSync(AGENTS_DIR, { recursive: true });
-
   try {
-    const url = slug
-      ? `${upstream.url}/agents/${slug}`
-      : `${upstream.url}/agents`;
-
-    console.log(dim(`Fetching from ${url}...`));
-
-    const headers: Record<string, string> = {};
-    if (upstream.secret) {
-      headers['X-Agent-Secret'] = upstream.secret;
-    }
-
-    const response = await fetch(url, { headers });
-
-    if (!response.ok) {
-      console.log(error(`API returned ${response.status}: ${response.statusText}`));
+    const result = await syncAgents(slug, ({ slug: agentSlug, version, model }) => {
+      console.log(success(`${agentSlug}`) + dim(` (v${version}${model ? ` · ${model}` : ''})`));
+    });
+    console.log('');
+    console.log(
+      success(`${result.count} agent${result.count === 1 ? '' : 's'} synced`) +
+        (result.skipped > 0 ? dim(` (${result.skipped} skipped)`) : ''),
+    );
+  } catch (err: any) {
+    if (err instanceof AgentSyncNotConfiguredError) {
+      console.log(error(err.message));
       process.exit(1);
     }
-
-    const data = await response.json() as any;
-    const agents = Array.isArray(data) ? data : [data];
-
-    // If we got the list endpoint, we need to fetch each agent's detail
-    // because the list doesn't include instruction fields
-    const needsDetail = Array.isArray(data) && agents.length > 0 && !agents[0].instructions;
-
-    let count = 0;
-    let skipped = 0;
-    const syncedSlugs: string[] = [];
-
-    for (const agent of agents) {
-      if (!agent.isActive) {
-        skipped++;
-        continue;
+    if (err instanceof AgentSyncError) {
+      console.log(error(err.message));
+      if (err.unreachable) {
+        console.log(dim('Is deva running? Check: curl ' + err.upstreamUrl + '/agents'));
       }
-
-      let detail = agent;
-
-      // Fetch full detail if we only have summary data
-      if (needsDetail) {
-        const detailRes = await fetch(`${upstream.url}/agents/${agent.id}`, { headers });
-        if (!detailRes.ok) {
-          console.log(chalk.yellow(`  ⚠ Skipped ${agent.name}: ${detailRes.status}`));
-          skipped++;
-          continue;
-        }
-        detail = await detailRes.json() as any;
-      }
-
-      const agentSlug = slugify(detail.role || detail.name);
-      const model = detail.defaultModel?.modelIdentifier;
-      const disallowed = detail.disallowedTools ? JSON.parse(detail.disallowedTools) : [];
-
-      // Build frontmatter
-      const frontmatter: Record<string, unknown> = {
-        slug: agentSlug,
-        name: detail.name,
-        role: detail.role,
-        version: detail.version || 1,
-      };
-      if (model) frontmatter.model = model;
-      if (detail.maxTurns) frontmatter.maxTurns = detail.maxTurns;
-      if (detail.defaultEnvironment) frontmatter.environment = detail.defaultEnvironment;
-      if (disallowed.length > 0) frontmatter.disallowedTools = disallowed;
-      frontmatter.synced = new Date().toISOString();
-
-      // Compose body from instruction fields (skip docs/procedures for now)
-      const sections: string[] = [];
-      if (detail.instructions) sections.push(`# Instructions\n\n${detail.instructions}`);
-      if (detail.responsibility) sections.push(`# Responsibility\n\n${detail.responsibility}`);
-      if (detail.beforeStart) sections.push(`# Before Start\n\n${detail.beforeStart}`);
-      if (detail.taskInstructions) sections.push(`# Task Instructions\n\n${detail.taskInstructions}`);
-      if (detail.desiredOutput) sections.push(`# Desired Output\n\n${detail.desiredOutput}`);
-      if (detail.whenFinished) sections.push(`# When Finished\n\n${detail.whenFinished}`);
-      if (detail.constraints) sections.push(`# Constraints\n\n${detail.constraints}`);
-
-      const body = sections.length > 0 ? sections.join('\n\n') : `# ${detail.name}\n\n_No instructions defined._\n`;
-      const content = matter.stringify(`\n${body}\n`, frontmatter);
-
-      writeFileSync(join(AGENTS_DIR, `${agentSlug}.md`), content);
-      count++;
-      syncedSlugs.push(agentSlug);
-      console.log(success(`${agentSlug}`) + dim(` (v${detail.version}${model ? ` · ${model}` : ''})`));
+      process.exit(1);
     }
-
-    console.log('');
-    console.log(success(`${count} agent${count === 1 ? '' : 's'} synced`) + (skipped > 0 ? dim(` (${skipped} skipped)`) : ''));
-
-    // Audit log — best-effort; use cwd .af as fallback (global op, no project required)
-    try {
-      const afPath = join(process.cwd(), '.af');
-      auditLog(afPath, {
-        event: 'agent.sync',
-        actor: 'cli',
-        detail: `Synced ${count} agent${count === 1 ? '' : 's'}`,
-        meta: { agents: syncedSlugs },
-      });
-    } catch {}
-  } catch (err: any) {
-    if (err.code === 'ECONNREFUSED') {
-      console.log(error(`Cannot reach agent-platform at ${upstream.url}`));
-      console.log(dim('Is deva running? Check: curl ' + upstream.url + '/agents'));
-    } else {
-      console.log(error(`Sync failed: ${err.message}`));
-    }
+    console.log(error(`Sync failed: ${err?.message ?? String(err)}`));
     process.exit(1);
   }
 }
