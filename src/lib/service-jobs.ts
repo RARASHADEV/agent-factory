@@ -35,6 +35,7 @@ import {
 import { resolveProject } from './workspace.js';
 import { createServiceExecutor } from './service-executor.js';
 import { CallbackDispatcher, type CallbackConfig } from './service-callbacks.js';
+import { takeBufferedBody, auditContext } from './service-audit.js';
 
 // ── HTTP helper (kept local so the module has no serve.ts import cycle) ───────
 
@@ -49,6 +50,10 @@ function sendJson(res: ServerResponse, status: number, body: Record<string, unkn
 
 /** Read and JSON-parse a request body (bounded). Returns {} for an empty body. */
 async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+  // AF-69: the audit middleware buffers the body up front (to log its stripped
+  // payload). A stream can only be read once, so reuse that buffered body if present.
+  const buffered = takeBufferedBody(req);
+  if (buffered !== undefined) return buffered;
   const chunks: Buffer[] = [];
   let size = 0;
   const MAX = 1024 * 1024; // 1 MiB guard
@@ -275,6 +280,10 @@ export class JobService {
     });
 
     this.queue.submit(queuedJob);
+
+    // AF-69 (§5.4 ③): surface the new job id to the audit middleware so log-last
+    // backfills request_log.job_id, linking the execution row to its journal entry.
+    auditContext(req).jobId = id;
 
     sendJson(res, 202, { id, status: 'queued', queuePosition });
   }

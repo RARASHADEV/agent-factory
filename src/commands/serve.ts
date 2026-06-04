@@ -21,6 +21,7 @@ import {
 import { isAuthorized } from '../lib/service-auth.js';
 import { openServiceDb, type ServiceDb } from '../lib/service-db.js';
 import { createJobService, type JobService } from '../lib/service-jobs.js';
+import { wrapWithAudit, type RouteAuditMeta } from '../lib/service-audit.js';
 import { error } from '../lib/format.js';
 
 export interface ServeOptions {
@@ -66,7 +67,7 @@ export function withAuth(handler: RouteHandler): RouteHandler {
   };
 }
 
-// ── Routes (AF-54: /health only) ─────────────────────────────────────────────
+// ── Routes (AF-54: /health · AF-56: /jobs · AF-69: /audit) ───────────────────
 
 /**
  * GET /health → { ok, running, queued, capacity }. When the execution-plane
@@ -85,20 +86,101 @@ function makeHealthRoute(jobs?: JobService): RouteHandler {
 }
 
 /**
- * Build the router. Keyed by "METHOD path" for exact routes; the dynamic
- * /jobs/:id (and /pause|/resume) routes are matched in `dispatch`. All entries go
- * through withAuth. When `jobs` (the AF-56 execution plane) is provided, the
- * /jobs routes are mounted and /health reports real queue counts.
+ * GET /audit → the cross-plane audit journal (design §4). Read-only and UNQUEUED:
+ * it returns immediately even while 20 jobs run (it never touches the queue), and
+ * reads via WAL so it never blocks the single writer. Filters:
+ *   ?since=&caller=&project=&plane=&op=&limit=
  */
-export function buildRouter(jobs?: JobService): Map<string, RouteHandler> {
+function makeAuditRoute(db: ServiceDb): RouteHandler {
+  return (req, res) => {
+    const q = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
+    const num = (v: string | null): number | undefined =>
+      v !== null && v !== '' && Number.isFinite(Number(v)) ? Number(v) : undefined;
+    const str = (v: string | null): string | undefined =>
+      v !== null && v !== '' ? v : undefined;
+
+    const rows = db.listRequestLog({
+      since: num(q.get('since')),
+      caller: str(q.get('caller')),
+      project: str(q.get('project')),
+      plane: str(q.get('plane')),
+      // `op` filters on the logical operation; map it onto the operation column.
+      // (listRequestLog has no `operation` filter, so filter here for the param.)
+      limit: num(q.get('limit')),
+    });
+    const op = str(q.get('op'));
+    const filtered = op ? rows.filter((r) => r.operation === op) : rows;
+    sendJson(res, 200, { entries: filtered.map(auditRowToJson) });
+  };
+}
+
+/** request_log row → the JSON shape GET /audit returns (snake→camel, §7.2). */
+function auditRowToJson(r: {
+  id: string;
+  receivedAt: number;
+  caller: string | null;
+  plane: string;
+  method: string;
+  path: string;
+  operation: string | null;
+  project: string | null;
+  jobId: string | null;
+  status: number | null;
+  outcome: string | null;
+  resultSummary: string | null;
+  respondedAt: number | null;
+}): Record<string, unknown> {
+  return {
+    id: r.id,
+    receivedAt: r.receivedAt,
+    caller: r.caller,
+    plane: r.plane,
+    method: r.method,
+    path: r.path,
+    operation: r.operation,
+    project: r.project,
+    jobId: r.jobId,
+    status: r.status,
+    outcome: r.outcome,
+    resultSummary: r.resultSummary,
+    respondedAt: r.respondedAt,
+  };
+}
+
+/**
+ * Compose the per-route middleware stack: audit OUTER, auth INNER. The §5.4
+ * ordering needs log-first to run BEFORE auth so a rejected (401) attempt is still
+ * journaled; the audit wrapper logs the arrival, then delegates to withAuth, whose
+ * 401 (or the handler's response) is captured by the same wrapper as log-last.
+ * When `db` is absent (health-only unit tests pre-AF-55) the stack is auth-only.
+ */
+function mount(db: ServiceDb | undefined, handler: RouteHandler, meta?: RouteAuditMeta): RouteHandler {
+  const authed = withAuth(handler);
+  return db ? wrapWithAudit(db, authed, meta) : authed;
+}
+
+/**
+ * Build the router. Keyed by "METHOD path" for exact routes; the dynamic
+ * /jobs/:id (and /pause|/resume) routes are matched in `dispatch`. Every entry is
+ * mounted through `mount` (audit + auth), so the Stage B route tickets inherit
+ * log-first/log-last automatically by registering their route here. When `db` is
+ * provided the audit journal is written and GET /audit is mounted; when `jobs` (the
+ * AF-56 execution plane) is provided the /jobs routes are mounted and /health
+ * reports real queue counts.
+ */
+export function buildRouter(jobs?: JobService, db?: ServiceDb): Map<string, RouteHandler> {
   const routes = new Map<string, RouteHandler>();
-  routes.set('GET /health', withAuth(makeHealthRoute(jobs)));
+  routes.set('GET /health', mount(db, makeHealthRoute(jobs)));
+
+  if (db) {
+    routes.set('GET /audit', mount(db, makeAuditRoute(db)));
+  }
 
   if (jobs) {
-    routes.set('POST /jobs', withAuth((req, res) => jobs.handlePost(req, res)));
+    routes.set('POST /jobs', mount(db, (req, res) => jobs.handlePost(req, res)));
     routes.set(
       'GET /jobs',
-      withAuth((req, res) => {
+      mount(db, (req, res) => {
         const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
         jobs.handleList(res, query);
       }),
@@ -135,17 +217,25 @@ export async function dispatch(
   res: ServerResponse,
   cfg: ResolvedServiceConfig,
   jobs?: JobService,
+  db?: ServiceDb,
 ): Promise<void> {
   const method = req.method ?? 'GET';
   const path = (req.url ?? '/').split('?')[0];
   let handler = routes.get(`${method} ${path}`);
-  // Dynamic /jobs/:id routes (only when the execution plane is wired), auth-gated.
+  // Dynamic /jobs/:id routes (only when the execution plane is wired). Mounted
+  // through `mount` so they inherit the same audit + auth stack as static routes.
   if (!handler && jobs) {
     const dynamic = matchJobRoute(jobs, method, path);
-    if (dynamic) handler = withAuth(dynamic);
+    if (dynamic) handler = mount(db, dynamic);
   }
   if (!handler) {
-    sendJson(res, 404, { ok: false, error: 'Not found' });
+    // Still journal the 404 attempt (an attempt is an attempt, §5.4) — but do NOT
+    // auth-gate it (an unknown route 404s for everyone, authed or not, preserving
+    // the pre-AF-69 contract). Audit-wrap only so the unknown route is logged +
+    // outcomed as 404/rejected.
+    const notFound: RouteHandler = (_q, r) => sendJson(r, 404, { ok: false, error: 'Not found' });
+    const wrapped = db ? wrapWithAudit(db, notFound) : notFound;
+    await wrapped(req, res, cfg);
     return;
   }
   try {
@@ -243,10 +333,10 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
     }, ONE_DAY_MS).unref();
   }
 
-  // 7. Build the router (auth-wrapped) and the HTTP server.
-  const routes = buildRouter(jobs);
+  // 7. Build the router (audit + auth wrapped) and the HTTP server.
+  const routes = buildRouter(jobs, db);
   const server = createServer((req, res) => {
-    void dispatch(routes, req, res, resolved, jobs);
+    void dispatch(routes, req, res, resolved, jobs, db);
   });
 
   // 8. Listen on the resolved tailnet/loopback address only.
@@ -261,6 +351,7 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
   console.log(`  GET  /jobs/:id           — job registry row`);
   console.log(`  GET  /jobs?project=&status=  — list jobs`);
   console.log(`  POST /jobs/:id/pause|resume  — pipeline control`);
+  console.log(`  GET  /audit ?since=&caller=&project=&plane=&op=&limit=  — cross-plane audit journal`);
   console.log(`  Auth: Authorization: Bearer <secret> required on every route`);
   console.log(`  Capacity: ${resolved.maxConcurrency} concurrent · queue backstop: ${resolved.maxQueueDepth}`);
   console.log(`Press Ctrl+C to stop.`);
