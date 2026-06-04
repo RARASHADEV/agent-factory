@@ -1,7 +1,6 @@
 import chalk from 'chalk';
-import { resolveProject } from '../lib/workspace.js';
-import { createProvider } from '../lib/provider-factory.js';
-import { STATUSES } from '../lib/constants.js';
+import { getProjectStatus } from '../lib/core/status.js';
+import { ProjectNotFoundError } from '../lib/core/errors.js';
 import { heading, statusColor, formatTaskLine, error, dim } from '../lib/format.js';
 
 interface StatusOptions {
@@ -9,40 +8,28 @@ interface StatusOptions {
 }
 
 export async function statusCommand(options: StatusOptions): Promise<void> {
-  const resolved = resolveProject(options.project);
-
-  if (!resolved) {
-    console.log(error('No project found. Run `af init <prefix>` or use --project <prefix>.'));
-    process.exit(1);
+  let result;
+  try {
+    result = await getProjectStatus(options.project);
+  } catch (err) {
+    if (err instanceof ProjectNotFoundError) {
+      console.log(error(err.message));
+      process.exit(1);
+    }
+    throw err;
   }
 
-  const { afPath, meta } = resolved;
-  const provider = createProvider(afPath, meta);
-  const tasks = await provider.list();
-
-  console.log(heading(`${meta.prefix} — ${meta.name}`));
+  console.log(heading(`${result.prefix} — ${result.name}`));
   console.log('');
 
-  // Group by status
-  const byStatus = new Map<string, typeof tasks>();
-  for (const status of STATUSES) {
-    byStatus.set(status, []);
-  }
-  for (const task of tasks) {
-    const group = byStatus.get(task.status) || [];
-    group.push(task);
-    byStatus.set(task.status, group);
-  }
-
-  // Print non-empty statuses
+  // Print non-empty statuses (in canonical order)
   let hasAny = false;
-  for (const status of STATUSES) {
-    const group = byStatus.get(status) || [];
-    if (group.length === 0) continue;
+  for (const group of result.groups) {
+    if (group.tasks.length === 0) continue;
     hasAny = true;
 
-    console.log(`  ${statusColor(status)} ${chalk.dim(`(${group.length})`)}`);
-    for (const task of group) {
+    console.log(`  ${statusColor(group.status)} ${chalk.dim(`(${group.tasks.length})`)}`);
+    for (const task of group.tasks) {
       console.log(`    ${formatTaskLine(task)}`);
     }
     console.log('');
@@ -53,7 +40,5 @@ export async function statusCommand(options: StatusOptions): Promise<void> {
   }
 
   // Summary line
-  const total = tasks.length;
-  const done = tasks.filter(t => ['released', 'closed'].includes(t.status)).length;
-  console.log(dim(`  ${total} tasks total, ${done} completed`));
+  console.log(dim(`  ${result.total} tasks total, ${result.done} completed`));
 }
