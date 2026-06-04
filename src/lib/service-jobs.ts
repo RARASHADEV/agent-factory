@@ -34,6 +34,7 @@ import {
 } from './service-db.js';
 import { resolveProject } from './workspace.js';
 import { createServiceExecutor } from './service-executor.js';
+import { CallbackDispatcher, type CallbackConfig } from './service-callbacks.js';
 
 // ── HTTP helper (kept local so the module has no serve.ts import cycle) ───────
 
@@ -111,6 +112,8 @@ export interface JobServiceOptions {
   resolveProjectFn?: ProjectResolver;
   /** Pipeline pause/resume wiring; omit to reject control with 501. */
   pipelineControl?: PipelineControl;
+  /** Completion-callback delivery policy (AF-57). Omit for production defaults. */
+  callbackConfig?: CallbackConfig;
 }
 
 /**
@@ -125,12 +128,15 @@ export class JobService {
   private readonly pipelineControl?: PipelineControl;
   /** afPath per job id, so pause/resume can locate the workspace post-submit. */
   private readonly afPaths = new Map<string, string>();
+  /** AF-57: delivers terminal completion callbacks (exactly-once, non-blocking). */
+  private readonly callbacks: CallbackDispatcher;
 
   constructor(opts: JobServiceOptions) {
     this.db = opts.db;
     this.queue = opts.queue;
     this.resolveProjectFn = opts.resolveProjectFn ?? defaultProjectResolver;
     this.pipelineControl = opts.pipelineControl;
+    this.callbacks = new CallbackDispatcher(opts.db, opts.callbackConfig);
   }
 
   /**
@@ -150,6 +156,8 @@ export class JobService {
         const now = Date.now();
         const resultStr =
           result === undefined ? null : typeof result === 'string' ? result : JSON.stringify(result);
+        // Persist the terminal transition FIRST (design §5.4 ③): the dispatch_jobs
+        // row + the terminal job_event are durable BEFORE any callback fires.
         this.db.updateJob(job.id, { status, completedAt: now, result: resultStr });
         this.db.appendJobEvent({
           jobId: job.id,
@@ -158,6 +166,15 @@ export class JobService {
           detail: resultStr,
         });
         this.afPaths.delete(job.id);
+
+        // AF-57 (§5.2 / §5.4 ④): now that the terminal state is persisted, POST the
+        // completion callback if this job was submitted with a `callback_url`. The
+        // url is read from the just-updated row (so it survives a boot re-admit, when
+        // the in-memory QueuedJob is reconstructed without it). fire() is total: it
+        // never throws and never blocks, so a callback can never crash the hook, the
+        // queue, or the job. Jobs without a callback_url are a no-op.
+        const row = this.db.getJob(job.id);
+        this.callbacks.fire(job.id, status, row?.callbackUrl ?? null, result);
       },
     };
   }
@@ -394,6 +411,8 @@ export function createJobService(deps: {
   maxQueueDepth: number;
   resolveProjectFn?: ProjectResolver;
   pipelineControl?: PipelineControl;
+  /** AF-57: completion-callback delivery policy. Omit for production defaults. */
+  callbackConfig?: CallbackConfig;
 }): JobService {
   const resolveProjectFn = deps.resolveProjectFn ?? defaultProjectResolver;
 
@@ -415,6 +434,7 @@ export function createJobService(deps: {
     queue,
     resolveProjectFn,
     pipelineControl: deps.pipelineControl,
+    callbackConfig: deps.callbackConfig,
   });
   service.configureBackstop(deps.maxQueueDepth);
 
