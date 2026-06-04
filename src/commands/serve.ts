@@ -10,6 +10,9 @@
 
 import { createServer } from 'http';
 import type { IncomingMessage, ServerResponse } from 'http';
+import { readFileSync } from 'fs';
+import { dirname, join } from 'path';
+import { fileURLToPath } from 'url';
 import { ENABLE_AF_53 } from '../lib/constants.js';
 import { loadConfig } from '../lib/config.js';
 import {
@@ -88,6 +91,240 @@ export function withAuth(handler: RouteHandler): RouteHandler {
     }
     return handler(req, res, cfg);
   };
+}
+
+// ── Route catalog (single source of truth) ───────────────────────────────────
+//
+// One declarative description of the whole API surface. Both the self-describing
+// GET / discovery endpoint AND the startup banner render FROM this array, so the
+// two can never drift. Each entry mirrors what a route does; add a route here and
+// it shows up in both places. `params` documents query params; `body` documents
+// required/notable request-body fields for the body-bearing routes.
+
+export interface RouteDoc {
+  method: string;
+  path: string;
+  plane: 'service' | 'execution' | 'query' | 'mutation';
+  description: string;
+  /** Notable query-string parameters, if any (e.g. `?status=`). */
+  params?: string;
+  /** Notable request-body fields for body-bearing routes (POST/PATCH). */
+  body?: string;
+}
+
+/**
+ * The canonical catalog of every route `af serve` exposes. Ordered service →
+ * execution → query → mutation so the banner reads top-down. This is the source
+ * of truth referenced by both `serviceIndex` (GET /) and `bannerLines`.
+ */
+export const ROUTE_CATALOG: readonly RouteDoc[] = [
+  {
+    method: 'GET',
+    path: '/',
+    plane: 'service',
+    description: 'service discovery — this catalog of every route + live config',
+  },
+  {
+    method: 'GET',
+    path: '/health',
+    plane: 'query',
+    description: 'health / live queue counts / capacity',
+  },
+  // Execution plane (async — queue + callback).
+  {
+    method: 'POST',
+    path: '/jobs',
+    plane: 'execution',
+    description: 'enqueue an execution job (async; 202 + queued, callback on finish)',
+    body: 'kind (agent|orchestration|pipeline), project (PREFIX, e.g. "AF"), role/domain/name, objective, optional callback_url',
+  },
+  {
+    method: 'GET',
+    path: '/jobs/:id',
+    plane: 'query',
+    description: 'job registry row',
+  },
+  {
+    method: 'GET',
+    path: '/jobs',
+    plane: 'query',
+    description: 'list jobs',
+    params: '?project=&status=',
+  },
+  {
+    method: 'POST',
+    path: '/jobs/:id/pause',
+    plane: 'execution',
+    description: 'pause a pipeline job',
+  },
+  {
+    method: 'POST',
+    path: '/jobs/:id/resume',
+    plane: 'execution',
+    description: 'resume a paused pipeline job',
+  },
+  {
+    method: 'GET',
+    path: '/audit',
+    plane: 'query',
+    description: 'cross-plane audit journal',
+    params: '?since=&caller=&project=&plane=&op=&limit=',
+  },
+  // Query plane (read-only · synchronous · NEVER queued).
+  {
+    method: 'GET',
+    path: '/projects',
+    plane: 'query',
+    description: 'project summary listing',
+  },
+  {
+    method: 'GET',
+    path: '/projects/:p/status',
+    plane: 'query',
+    description: 'status overview for one project',
+  },
+  {
+    method: 'GET',
+    path: '/projects/:p/tasks',
+    plane: 'query',
+    description: 'task listing for one project',
+    params: '?status=',
+  },
+  {
+    method: 'GET',
+    path: '/tasks/:ticket',
+    plane: 'query',
+    description: 'one task (404 when unknown)',
+  },
+  {
+    method: 'GET',
+    path: '/agents',
+    plane: 'query',
+    description: 'agent registry listing',
+  },
+  {
+    method: 'GET',
+    path: '/agents/:slug',
+    plane: 'query',
+    description: 'one agent (404 when unknown)',
+  },
+  {
+    method: 'GET',
+    path: '/pipelines',
+    plane: 'query',
+    description: 'pipeline run listing',
+  },
+  {
+    method: 'GET',
+    path: '/pipelines/:ticket',
+    plane: 'query',
+    description: 'one pipeline run (404 when no run)',
+  },
+  // Mutation plane (writes · synchronous · NEVER queued).
+  {
+    method: 'POST',
+    path: '/projects',
+    plane: 'mutation',
+    description: 'init a workspace',
+    body: 'prefix (required), optional name, optional path (absolute project dir)',
+  },
+  {
+    method: 'POST',
+    path: '/projects/:p/tasks',
+    plane: 'mutation',
+    description: 'create a task',
+    body: 'title (required), optional type/priority/complexity/assignee/due/description/design/ticket/depends[]',
+  },
+  {
+    method: 'PATCH',
+    path: '/tasks/:ticket',
+    plane: 'mutation',
+    description: 'move / assign / log a task',
+    body: 'exactly one of status | assignee | log',
+  },
+  {
+    method: 'POST',
+    path: '/agents/sync',
+    plane: 'mutation',
+    description: 'import agents from the upstream platform',
+    body: 'optional slug (sync one agent)',
+  },
+  {
+    method: 'POST',
+    path: '/sync',
+    plane: 'mutation',
+    description: 'synchronize a project with Loka',
+    body: 'optional project (PREFIX), optional mode (push|pull|bidirectional)',
+  },
+];
+
+/**
+ * The service version, read from the package.json at the package root. At runtime
+ * this file lives at <pkg>/dist/commands/serve.js, so package.json is two levels
+ * up. Falls back to '0.0.0' if it cannot be read (never throws on the request path).
+ */
+export function serviceVersion(): string {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const pkgPath = join(here, '..', '..', 'package.json');
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8')) as { version?: unknown };
+    return typeof pkg.version === 'string' ? pkg.version : '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
+
+/**
+ * Build the GET / discovery document: the self-describing JSON catalog of the API
+ * surface plus the live, resolved service config. One URL a consumer (human or
+ * machine) can hit to learn how to call every service. Built FROM ROUTE_CATALOG so
+ * it stays in lockstep with the banner.
+ */
+export function serviceIndex(cfg: ResolvedServiceConfig): Record<string, unknown> {
+  return {
+    service: 'af-serve',
+    version: serviceVersion(),
+    auth: 'Authorization: Bearer <secret> required on every route',
+    capacity: {
+      maxConcurrency: cfg.maxConcurrency,
+      maxQueueDepth: cfg.maxQueueDepth,
+    },
+    notes: [
+      "project is the registry PREFIX (e.g. 'AF'), not the directory name",
+      'execution routes are async (queue+callback); query/mutation are synchronous',
+    ],
+    endpoints: ROUTE_CATALOG.map((r) => ({
+      method: r.method,
+      path: r.path,
+      plane: r.plane,
+      description: r.description,
+      ...(r.params ? { params: r.params } : {}),
+      ...(r.body ? { body: r.body } : {}),
+    })),
+  };
+}
+
+/** GET / → the service discovery document (auth + audit applied via `mount`). */
+function makeServiceIndexRoute(): RouteHandler {
+  return (_req, res, cfg) => {
+    sendJson(res, 200, serviceIndex(cfg));
+  };
+}
+
+/**
+ * Render the startup banner body lines FROM the same ROUTE_CATALOG, so the banner
+ * and GET / can never drift. Returns the per-route lines (without the leading
+ * "listening on …" line, which depends on the resolved host/port).
+ */
+export function bannerLines(cfg: ResolvedServiceConfig): string[] {
+  const lines = ROUTE_CATALOG.map((r) => {
+    const suffix = r.params ? ` ${r.params}` : '';
+    const sig = `${r.method.padEnd(5)}${r.path}${suffix}`;
+    return `  ${sig.padEnd(40)} — ${r.description}`;
+  });
+  lines.push(`  Auth: Authorization: Bearer <secret> required on every route`);
+  lines.push(`  Capacity: ${cfg.maxConcurrency} concurrent · queue backstop: ${cfg.maxQueueDepth}`);
+  return lines;
 }
 
 // ── Routes (AF-54: /health · AF-56: /jobs · AF-69: /audit) ───────────────────
@@ -523,6 +760,10 @@ function mount(db: ServiceDb | undefined, handler: RouteHandler, meta?: RouteAud
  */
 export function buildRouter(jobs?: JobService, db?: ServiceDb): Map<string, RouteHandler> {
   const routes = new Map<string, RouteHandler>();
+  // GET / — self-describing service discovery. Mounted through `mount` so it is
+  // bearer-authed + audit-logged exactly like every other route (a 401 without
+  // the secret); never unauthenticated.
+  routes.set('GET /', mount(db, makeServiceIndexRoute()));
   routes.set('GET /health', mount(db, makeHealthRoute(jobs)));
 
   if (db) {
@@ -728,14 +969,9 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
   });
 
   console.log(`af serve listening on http://${host}:${resolved.port}`);
-  console.log(`  GET  /health             — health / live queue counts / capacity`);
-  console.log(`  POST /jobs               — enqueue an execution job (agent|orchestration|pipeline)`);
-  console.log(`  GET  /jobs/:id           — job registry row`);
-  console.log(`  GET  /jobs?project=&status=  — list jobs`);
-  console.log(`  POST /jobs/:id/pause|resume  — pipeline control`);
-  console.log(`  GET  /audit ?since=&caller=&project=&plane=&op=&limit=  — cross-plane audit journal`);
-  console.log(`  Auth: Authorization: Bearer <secret> required on every route`);
-  console.log(`  Capacity: ${resolved.maxConcurrency} concurrent · queue backstop: ${resolved.maxQueueDepth}`);
+  // Render the route lines FROM the shared ROUTE_CATALOG so the banner and GET /
+  // can never drift (single source of truth).
+  for (const line of bannerLines(resolved)) console.log(line);
   console.log(`Press Ctrl+C to stop.`);
 
   // 9. Graceful shutdown — close the DB connection before exit.

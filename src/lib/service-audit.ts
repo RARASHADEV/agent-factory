@@ -54,6 +54,7 @@ export const AUDIT_ROUTES: ReadonlyMap<string, RouteAuditMeta> = new Map<string,
   ['POST /jobs', { plane: 'execution', operation: 'agent.spawn' }],
   ['GET /jobs', { plane: 'query', operation: 'jobs.list' }],
   // Observability service (read-only, unqueued).
+  ['GET /', { plane: 'query', operation: 'service.index' }],
   ['GET /audit', { plane: 'query', operation: 'audit.list' }],
   ['GET /health', { plane: 'query', operation: 'health.get' }],
   // Query plane (AF-59 — read-only, synchronous, NEVER queued). The dynamic
