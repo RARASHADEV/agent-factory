@@ -132,11 +132,23 @@ async function get(url: string, headers: Record<string, unknown> = AUTH, jobs?: 
 
 describe('query plane: parity with the af CLI core op (design test 7)', () => {
   it('GET /projects returns exactly listProjectsSummary()', async () => {
+    // Both the route and the CLI call the SAME core op, so the bytes must match.
+    // listProjectsSummary() reads the live workspace (task counts), which other
+    // test files in the concurrent suite can mutate. Bracket the request with two
+    // core-op snapshots and accept a match to either — this proves byte-parity with
+    // the shared engine while absorbing a concurrent workspace write landing mid-request.
+    const before = await listProjectsSummary();
     const res = await get('/projects');
     assert.equal(res.statusCode, 200);
-    // Both the route and the CLI call the SAME core op, so the bytes must match.
-    const expected = await listProjectsSummary();
-    assert.deepEqual(JSON.parse(res.body), expected);
+    const after = await listProjectsSummary();
+    const body = JSON.parse(res.body);
+    const matches =
+      JSON.stringify(body) === JSON.stringify(before) ||
+      JSON.stringify(body) === JSON.stringify(after);
+    assert.ok(
+      matches,
+      `GET /projects body did not match listProjectsSummary() before/after the request.\nbody:   ${res.body}\nbefore: ${JSON.stringify(before)}\nafter:  ${JSON.stringify(after)}`,
+    );
   });
 
   it('GET /agents returns exactly listAgents()', async () => {
