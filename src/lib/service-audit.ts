@@ -56,6 +56,12 @@ export const AUDIT_ROUTES: ReadonlyMap<string, RouteAuditMeta> = new Map<string,
   // Observability service (read-only, unqueued).
   ['GET /audit', { plane: 'query', operation: 'audit.list' }],
   ['GET /health', { plane: 'query', operation: 'health.get' }],
+  // Query plane (AF-59 — read-only, synchronous, NEVER queued). The dynamic
+  // id-bearing routes (/projects/:p/*, /tasks/:ticket, /agents/:slug,
+  // /pipelines/:ticket) are resolved by matchDynamicAuditMeta below.
+  ['GET /projects', { plane: 'query', operation: 'projects.list' }],
+  ['GET /agents', { plane: 'query', operation: 'agents.list' }],
+  ['GET /pipelines', { plane: 'query', operation: 'pipelines.list' }],
 ]);
 
 /**
@@ -68,6 +74,22 @@ export function matchDynamicAuditMeta(method: string, path: string): RouteAuditM
   }
   if (method === 'GET' && /^\/jobs\/[^/]+$/.test(path)) {
     return { plane: 'query', operation: 'jobs.get' };
+  }
+  // AF-59 query plane — id-bearing read routes (all sync, unqueued).
+  if (method === 'GET' && /^\/projects\/[^/]+\/status$/.test(path)) {
+    return { plane: 'query', operation: 'projects.status' };
+  }
+  if (method === 'GET' && /^\/projects\/[^/]+\/tasks$/.test(path)) {
+    return { plane: 'query', operation: 'tasks.list' };
+  }
+  if (method === 'GET' && /^\/tasks\/[^/]+$/.test(path)) {
+    return { plane: 'query', operation: 'tasks.show' };
+  }
+  if (method === 'GET' && /^\/agents\/[^/]+$/.test(path)) {
+    return { plane: 'query', operation: 'agents.show' };
+  }
+  if (method === 'GET' && /^\/pipelines\/[^/]+$/.test(path)) {
+    return { plane: 'query', operation: 'pipelines.status' };
   }
   return undefined;
 }

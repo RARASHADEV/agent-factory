@@ -23,6 +23,12 @@ import { openServiceDb, type ServiceDb } from '../lib/service-db.js';
 import { createJobService, type JobService } from '../lib/service-jobs.js';
 import { wrapWithAudit, type RouteAuditMeta } from '../lib/service-audit.js';
 import { error } from '../lib/format.js';
+import { ProjectNotFoundError } from '../lib/core/errors.js';
+import { listProjectsSummary } from '../lib/core/projects.js';
+import { getProjectStatus } from '../lib/core/status.js';
+import { listTasks, showTask } from '../lib/core/tasks.js';
+import { listAgents, showAgent } from '../lib/core/agents.js';
+import { listPipelineRuns, getPipelineRun } from '../lib/core/pipelines.js';
 
 export interface ServeOptions {
   port?: number;
@@ -147,6 +153,149 @@ function auditRowToJson(r: {
   };
 }
 
+// ── Query plane (AF-59: read-only · synchronous · NEVER queued) ──────────────
+//
+// Each handler is a thin adapter over an AF-58/AF-59 core read op: validate the
+// path/query params, call the core op, serialize the structured result as JSON.
+// NO business logic lives here. These routes never touch the job queue, so
+// GET /projects answers immediately even while 20 jobs run (design test 6).
+// They are mounted through `mount` so they inherit auth (401) + audit logging.
+//
+// Error mapping (§6 project guardrail): an unresolvable project → 400 (catch
+// ProjectNotFoundError); an unknown ticket/slug/run → 404. Both responses are
+// JSON `{ ok:false, error }`, matching the rest of the surface.
+
+/** Decode a path segment, returning undefined for an empty/invalid one. */
+function pathParam(raw: string): string {
+  return decodeURIComponent(raw);
+}
+
+/**
+ * Run a query handler, mapping core-op errors to HTTP. ProjectNotFoundError →
+ * 400 (unknown project rejected, §6); any other throw bubbles to dispatch's 500.
+ */
+async function runQuery(
+  res: ServerResponse,
+  fn: () => Promise<void> | void,
+): Promise<void> {
+  try {
+    await fn();
+  } catch (err) {
+    if (err instanceof ProjectNotFoundError) {
+      sendJson(res, 400, { ok: false, error: err.message });
+      return;
+    }
+    throw err;
+  }
+}
+
+/** GET /projects → the project summary listing (mirrors `af projects`). */
+const queryProjects: RouteHandler = (_req, res) =>
+  runQuery(res, async () => {
+    const data = await listProjectsSummary();
+    sendJson(res, 200, data as unknown as Record<string, unknown>);
+  });
+
+/** GET /projects/:p/status → status overview for one project. */
+function queryProjectStatus(prefix: string): RouteHandler {
+  return (_req, res) =>
+    runQuery(res, async () => {
+      const data = await getProjectStatus(prefix);
+      sendJson(res, 200, data as unknown as Record<string, unknown>);
+    });
+}
+
+/** GET /projects/:p/tasks?status= → task listing for one project. */
+function queryProjectTasks(prefix: string): RouteHandler {
+  return (req, res) =>
+    runQuery(res, async () => {
+      const q = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
+      const status = q.get('status');
+      const query = status ? { status } : {};
+      const data = await listTasks(query, prefix);
+      sendJson(res, 200, data as unknown as Record<string, unknown>);
+    });
+}
+
+/** GET /tasks/:ticket → one task (404 when the ticket does not exist). */
+function queryTask(ticket: string): RouteHandler {
+  return (_req, res) =>
+    runQuery(res, async () => {
+      const data = await showTask(ticket);
+      if (!data) {
+        sendJson(res, 404, { ok: false, error: `Task ${ticket} not found` });
+        return;
+      }
+      sendJson(res, 200, data as unknown as Record<string, unknown>);
+    });
+}
+
+/** GET /agents → the agent registry listing (mirrors `af agent list`). */
+const queryAgents: RouteHandler = (_req, res) =>
+  runQuery(res, () => {
+    const data = listAgents();
+    sendJson(res, 200, data as unknown as Record<string, unknown>);
+  });
+
+/** GET /agents/:slug → one agent (404 when the slug is unknown). */
+function queryAgent(slug: string): RouteHandler {
+  return (_req, res) =>
+    runQuery(res, () => {
+      const data = showAgent(slug);
+      if (!data) {
+        sendJson(res, 404, { ok: false, error: `Agent ${slug} not found` });
+        return;
+      }
+      sendJson(res, 200, data as unknown as Record<string, unknown>);
+    });
+}
+
+/** GET /pipelines → pipeline run listing (mirrors `af pipeline status`). */
+const queryPipelines: RouteHandler = (_req, res) =>
+  runQuery(res, () => {
+    const data = listPipelineRuns();
+    sendJson(res, 200, data as unknown as Record<string, unknown>);
+  });
+
+/** GET /pipelines/:ticket → one pipeline run (404 when no run exists). */
+function queryPipeline(ticket: string): RouteHandler {
+  return (_req, res) =>
+    runQuery(res, () => {
+      const data = getPipelineRun(ticket);
+      if (!data) {
+        sendJson(res, 404, { ok: false, error: `No pipeline run for ${ticket}` });
+        return;
+      }
+      sendJson(res, 200, data as unknown as Record<string, unknown>);
+    });
+}
+
+/**
+ * Match a dynamic (id-bearing) query-plane route → a bound handler, or undefined.
+ * The static query routes (GET /projects, /agents, /pipelines) live in
+ * `buildRouter`; these carry a path parameter and are matched here.
+ */
+export function matchQueryRoute(method: string, path: string): RouteHandler | undefined {
+  if (method !== 'GET') return undefined;
+
+  let m = /^\/projects\/([^/]+)\/status$/.exec(path);
+  if (m) return queryProjectStatus(pathParam(m[1]));
+
+  m = /^\/projects\/([^/]+)\/tasks$/.exec(path);
+  if (m) return queryProjectTasks(pathParam(m[1]));
+
+  m = /^\/tasks\/([^/]+)$/.exec(path);
+  if (m) return queryTask(pathParam(m[1]));
+
+  m = /^\/agents\/([^/]+)$/.exec(path);
+  if (m) return queryAgent(pathParam(m[1]));
+
+  m = /^\/pipelines\/([^/]+)$/.exec(path);
+  if (m) return queryPipeline(pathParam(m[1]));
+
+  return undefined;
+}
+
 /**
  * Compose the per-route middleware stack: audit OUTER, auth INNER. The §5.4
  * ordering needs log-first to run BEFORE auth so a rejected (401) attempt is still
@@ -175,6 +324,15 @@ export function buildRouter(jobs?: JobService, db?: ServiceDb): Map<string, Rout
   if (db) {
     routes.set('GET /audit', mount(db, makeAuditRoute(db)));
   }
+
+  // Query plane (AF-59) — static read routes. Synchronous + unqueued: they never
+  // touch `jobs`, so they answer immediately even while the queue is saturated.
+  // Mounted through `mount` for auth + audit. The id-bearing query routes
+  // (/projects/:p/*, /tasks/:ticket, /agents/:slug, /pipelines/:ticket) are matched
+  // in `dispatch` via `matchQueryRoute`.
+  routes.set('GET /projects', mount(db, queryProjects));
+  routes.set('GET /agents', mount(db, queryAgents));
+  routes.set('GET /pipelines', mount(db, queryPipelines));
 
   if (jobs) {
     routes.set('POST /jobs', mount(db, (req, res) => jobs.handlePost(req, res)));
@@ -227,6 +385,12 @@ export async function dispatch(
   if (!handler && jobs) {
     const dynamic = matchJobRoute(jobs, method, path);
     if (dynamic) handler = mount(db, dynamic);
+  }
+  // Dynamic query-plane routes (AF-59) — id-bearing read routes. Sync + unqueued;
+  // mounted through `mount` for the same auth + audit stack.
+  if (!handler) {
+    const query = matchQueryRoute(method, path);
+    if (query) handler = mount(db, query);
   }
   if (!handler) {
     // Still journal the 404 attempt (an attempt is an attempt, §5.4) — but do NOT
