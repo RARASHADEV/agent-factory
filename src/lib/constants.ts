@@ -103,6 +103,15 @@ export const ENABLE_AF_53 = false;
  */
 export const AF_MAX_CONCURRENCY_DEFAULT = 20;
 
+/**
+ * AF-53 (§8, Decision 6): default queue-depth backstop for the `af serve` queue.
+ * If the number of WAITING (not running) jobs is at or above this ceiling, the
+ * next `POST /jobs` is rejected `429 { error, retryAfter }` and enqueues nothing —
+ * an abuse/runaway backstop, not the normal flow. In-flight jobs are unaffected.
+ * Overridable via the AF_MAX_QUEUE_DEPTH env var / `service.maxQueueDepth` config.
+ */
+export const AF_MAX_QUEUE_DEPTH_DEFAULT = 500;
+
 /** AF-53 (§8, Decision 4): default listen port — distinct from webhook's 4100. */
 export const AF_SERVICE_PORT_DEFAULT = 4150;
 

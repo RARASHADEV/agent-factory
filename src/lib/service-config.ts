@@ -8,6 +8,7 @@
 import { execFileSync } from 'child_process';
 import {
   AF_MAX_CONCURRENCY_DEFAULT,
+  AF_MAX_QUEUE_DEPTH_DEFAULT,
   AF_SERVICE_PORT_DEFAULT,
   AF_SERVICE_DB_DEFAULT,
   AF_SERVICE_RETENTION_DAYS_DEFAULT,
@@ -22,6 +23,8 @@ export interface ResolvedServiceConfig {
   bind?: string;
   allowPublic: boolean;
   maxConcurrency: number;
+  /** Queue-depth backstop (Decision 6). Waiting jobs ≥ this → 429. */
+  maxQueueDepth: number;
   db: string;
   /** Retention in days (Decision 10). 0 = keep everything; positive = prune terminal jobs/events. */
   retentionDays: number;
@@ -64,6 +67,10 @@ export function resolveServiceConfig(
     maxConcurrency: asInt(
       env.AF_MAX_CONCURRENCY ?? cfg?.maxConcurrency,
       AF_MAX_CONCURRENCY_DEFAULT,
+    ),
+    maxQueueDepth: asInt(
+      env.AF_MAX_QUEUE_DEPTH ?? cfg?.maxQueueDepth,
+      AF_MAX_QUEUE_DEPTH_DEFAULT,
     ),
     db: env.AF_SERVICE_DB ?? cfg?.db ?? AF_SERVICE_DB_DEFAULT,
     retentionDays: asInt(

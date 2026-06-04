@@ -114,14 +114,24 @@ describe('service bind safety', () => {
 // ── Config resolution (§8: env overrides config) ─────────────────────────────
 
 describe('resolveServiceConfig', () => {
-  it('defaults: port 4150, capacity 20, allowPublic false, default db', () => {
+  it('defaults: port 4150, capacity 20, queue depth 500, allowPublic false, default db', () => {
     const r = resolveServiceConfig(undefined, {});
     assert.equal(r.port, 4150);
     assert.equal(r.maxConcurrency, 20);
+    assert.equal(r.maxQueueDepth, 500);
     assert.equal(r.allowPublic, false);
     assert.equal(r.secret, '');
     assert.equal(r.bind, undefined);
     assert.equal(r.db.endsWith('service.db'), true);
+  });
+
+  it('maxQueueDepth: config + env resolve, env wins (§8, Decision 6)', () => {
+    assert.equal(resolveServiceConfig({ maxQueueDepth: 100 }, {}).maxQueueDepth, 100);
+    assert.equal(
+      resolveServiceConfig({ maxQueueDepth: 100 }, { AF_MAX_QUEUE_DEPTH: '7' }).maxQueueDepth,
+      7,
+    );
+    assert.equal(resolveServiceConfig(undefined, { AF_MAX_QUEUE_DEPTH: 'x' }).maxQueueDepth, 500);
   });
 
   it('config block is used when env absent', () => {
@@ -202,6 +212,7 @@ const CFG: ResolvedServiceConfig = {
   port: 4150,
   allowPublic: false,
   maxConcurrency: 20,
+  maxQueueDepth: 500,
   db: '/tmp/service.db',
   retentionDays: 0,
 };

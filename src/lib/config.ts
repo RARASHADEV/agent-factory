@@ -55,6 +55,12 @@ export interface ServiceConfig {
   /** Global worker concurrency cap. Default 20; env AF_MAX_CONCURRENCY overrides. */
   maxConcurrency?: number;
   /**
+   * Queue-depth backstop (Decision 6). Default 500; env AF_MAX_QUEUE_DEPTH overrides.
+   * When the number of waiting (not running) jobs reaches this ceiling, `POST /jobs`
+   * returns 429 and enqueues nothing.
+   */
+  maxQueueDepth?: number;
+  /**
    * SQLite database path (jobs + audit journal; built in a later ticket).
    * Default ~/.af/service.db; env AF_SERVICE_DB overrides.
    */

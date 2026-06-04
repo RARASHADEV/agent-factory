@@ -20,6 +20,7 @@ import {
 } from '../lib/service-config.js';
 import { isAuthorized } from '../lib/service-auth.js';
 import { openServiceDb, type ServiceDb } from '../lib/service-db.js';
+import { createJobService, type JobService } from '../lib/service-jobs.js';
 import { error } from '../lib/format.js';
 
 export interface ServeOptions {
@@ -68,26 +69,63 @@ export function withAuth(handler: RouteHandler): RouteHandler {
 // ── Routes (AF-54: /health only) ─────────────────────────────────────────────
 
 /**
- * GET /health → { ok, running, queued, capacity }. The queue is not built yet,
- * so running/queued are placeholder zeros; capacity reflects AF_MAX_CONCURRENCY.
+ * GET /health → { ok, running, queued, capacity }. When the execution-plane
+ * JobService is wired (AF-56), running/queued report the live queue counts;
+ * without it (e.g. health-only unit tests) they fall back to 0.
  */
-const healthRoute: RouteHandler = (_req, res, cfg) => {
-  sendJson(res, 200, {
-    ok: true,
-    running: 0,
-    queued: 0,
-    capacity: cfg.maxConcurrency,
-  });
-};
+function makeHealthRoute(jobs?: JobService): RouteHandler {
+  return (_req, res, cfg) => {
+    sendJson(res, 200, {
+      ok: true,
+      running: jobs ? jobs.queue.runningCount() : 0,
+      queued: jobs ? jobs.queue.queuedCount() : 0,
+      capacity: cfg.maxConcurrency,
+    });
+  };
+}
 
 /**
- * Minimal router. Keyed by "METHOD path"; later tickets add /jobs, /audit, and
- * the query/mutation routes here. All entries go through withAuth.
+ * Build the router. Keyed by "METHOD path" for exact routes; the dynamic
+ * /jobs/:id (and /pause|/resume) routes are matched in `dispatch`. All entries go
+ * through withAuth. When `jobs` (the AF-56 execution plane) is provided, the
+ * /jobs routes are mounted and /health reports real queue counts.
  */
-export function buildRouter(): Map<string, RouteHandler> {
+export function buildRouter(jobs?: JobService): Map<string, RouteHandler> {
   const routes = new Map<string, RouteHandler>();
-  routes.set('GET /health', withAuth(healthRoute));
+  routes.set('GET /health', withAuth(makeHealthRoute(jobs)));
+
+  if (jobs) {
+    routes.set('POST /jobs', withAuth((req, res) => jobs.handlePost(req, res)));
+    routes.set(
+      'GET /jobs',
+      withAuth((req, res) => {
+        const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
+        jobs.handleList(res, query);
+      }),
+    );
+  }
   return routes;
+}
+
+/** Match a dynamic /jobs route. Returns a bound handler or undefined. */
+function matchJobRoute(
+  jobs: JobService,
+  method: string,
+  path: string,
+): RouteHandler | undefined {
+  // /jobs/:id/pause | /jobs/:id/resume
+  const ctrl = /^\/jobs\/([^/]+)\/(pause|resume)$/.exec(path);
+  if (ctrl && method === 'POST') {
+    const [, id, action] = ctrl;
+    return (_req, res) => jobs.handleControl(res, decodeURIComponent(id), action as 'pause' | 'resume');
+  }
+  // /jobs/:id
+  const one = /^\/jobs\/([^/]+)$/.exec(path);
+  if (one && method === 'GET') {
+    const [, id] = one;
+    return (_req, res) => jobs.handleGetOne(res, decodeURIComponent(id));
+  }
+  return undefined;
 }
 
 /** Dispatch a request to the router, returning 404 for unknown routes. */
@@ -96,10 +134,16 @@ export async function dispatch(
   req: IncomingMessage,
   res: ServerResponse,
   cfg: ResolvedServiceConfig,
+  jobs?: JobService,
 ): Promise<void> {
   const method = req.method ?? 'GET';
   const path = (req.url ?? '/').split('?')[0];
-  const handler = routes.get(`${method} ${path}`);
+  let handler = routes.get(`${method} ${path}`);
+  // Dynamic /jobs/:id routes (only when the execution plane is wired), auth-gated.
+  if (!handler && jobs) {
+    const dynamic = matchJobRoute(jobs, method, path);
+    if (dynamic) handler = withAuth(dynamic);
+  }
   if (!handler) {
     sendJson(res, 404, { ok: false, error: 'Not found' });
     return;
@@ -169,6 +213,20 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
     `Storage: ${resolved.db} (WAL) — reconcile: ${reconciled.requeued} queued re-dispatchable, ${reconciled.failed} orphaned running → failed`,
   );
 
+  // AF-56: build the execution plane — the global concurrency queue + registry
+  // wiring — and re-admit any rows reconcile left `queued` so dispatch survives a
+  // restart (design test 5). The queue runs work through the existing dispatch
+  // mechanisms (service-executor.ts) in each job's project-local workspace.
+  const jobs = createJobService({
+    db,
+    capacity: resolved.maxConcurrency,
+    maxQueueDepth: resolved.maxQueueDepth,
+  });
+  const readmitted = jobs.readmitQueued();
+  if (readmitted > 0) {
+    console.log(`Execution plane: re-admitted ${readmitted} queued job(s) into the in-process queue`);
+  }
+
   // Retention (Decision 10): boot-time sweep + a daily timer. Default 0 = keep
   // everything; request_log is never pruned. The timer is unref'd so it never
   // keeps the process alive on its own.
@@ -186,9 +244,9 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
   }
 
   // 7. Build the router (auth-wrapped) and the HTTP server.
-  const routes = buildRouter();
+  const routes = buildRouter(jobs);
   const server = createServer((req, res) => {
-    void dispatch(routes, req, res, resolved);
+    void dispatch(routes, req, res, resolved, jobs);
   });
 
   // 8. Listen on the resolved tailnet/loopback address only.
@@ -198,9 +256,13 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
   });
 
   console.log(`af serve listening on http://${host}:${resolved.port}`);
-  console.log(`  GET /health   — health / capacity`);
+  console.log(`  GET  /health             — health / live queue counts / capacity`);
+  console.log(`  POST /jobs               — enqueue an execution job (agent|orchestration|pipeline)`);
+  console.log(`  GET  /jobs/:id           — job registry row`);
+  console.log(`  GET  /jobs?project=&status=  — list jobs`);
+  console.log(`  POST /jobs/:id/pause|resume  — pipeline control`);
   console.log(`  Auth: Authorization: Bearer <secret> required on every route`);
-  console.log(`  Capacity: ${resolved.maxConcurrency}`);
+  console.log(`  Capacity: ${resolved.maxConcurrency} concurrent · queue backstop: ${resolved.maxQueueDepth}`);
   console.log(`Press Ctrl+C to stop.`);
 
   // 9. Graceful shutdown — close the DB connection before exit.
