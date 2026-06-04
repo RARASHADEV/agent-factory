@@ -59,6 +59,12 @@ export interface ServiceConfig {
    * Default ~/.af/service.db; env AF_SERVICE_DB overrides.
    */
   db?: string;
+  /**
+   * Retention in days (Decision 10). 0 (default) = keep everything, never prune.
+   * A positive value prunes only terminal `dispatch_jobs`/`job_events` older than
+   * N days; `request_log` is never auto-pruned. Env AF_SERVICE_RETENTION_DAYS overrides.
+   */
+  retentionDays?: number;
 }
 
 export interface GlobalConfig {

@@ -19,6 +19,7 @@ import {
   type ResolvedServiceConfig,
 } from '../lib/service-config.js';
 import { isAuthorized } from '../lib/service-auth.js';
+import { openServiceDb, type ServiceDb } from '../lib/service-db.js';
 import { error } from '../lib/format.js';
 
 export interface ServeOptions {
@@ -152,13 +153,45 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
   }
   const host = decision.address;
 
-  // 6. Build the router (auth-wrapped) and the HTTP server.
+  // 6. Open the SQLite store (AF-55): creates/opens cfg.db, enables WAL, applies
+  //    the §7 schema. Then reconcile on boot so no in-flight job is silently lost
+  //    across a restart — orphaned `running` rows become `failed` (re-dispatchable)
+  //    and still-`queued` rows are reported for re-dispatch (the queue lands in AF-56).
+  let db: ServiceDb;
+  try {
+    db = openServiceDb(resolved.db);
+  } catch (err: any) {
+    console.log(error(`Cannot open service database at ${resolved.db}: ${err?.message ?? String(err)}`));
+    process.exit(1);
+  }
+  const reconciled = db.reconcileOnBoot();
+  console.log(
+    `Storage: ${resolved.db} (WAL) — reconcile: ${reconciled.requeued} queued re-dispatchable, ${reconciled.failed} orphaned running → failed`,
+  );
+
+  // Retention (Decision 10): boot-time sweep + a daily timer. Default 0 = keep
+  // everything; request_log is never pruned. The timer is unref'd so it never
+  // keeps the process alive on its own.
+  if (resolved.retentionDays > 0) {
+    const pruned = db.pruneRetention(resolved.retentionDays);
+    console.log(`Retention: ${resolved.retentionDays}d — pruned ${pruned} terminal job(s) on boot`);
+    const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+    setInterval(() => {
+      try {
+        db.pruneRetention(resolved.retentionDays);
+      } catch (err: any) {
+        process.stderr.write(`[serve] retention sweep failed: ${err?.message ?? String(err)}\n`);
+      }
+    }, ONE_DAY_MS).unref();
+  }
+
+  // 7. Build the router (auth-wrapped) and the HTTP server.
   const routes = buildRouter();
   const server = createServer((req, res) => {
     void dispatch(routes, req, res, resolved);
   });
 
-  // 7. Listen on the resolved tailnet/loopback address only.
+  // 8. Listen on the resolved tailnet/loopback address only.
   await new Promise<void>((resolve, reject) => {
     server.on('error', reject);
     server.listen(resolved.port, host, () => resolve());
@@ -170,9 +203,12 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
   console.log(`  Capacity: ${resolved.maxConcurrency}`);
   console.log(`Press Ctrl+C to stop.`);
 
-  // 8. Graceful shutdown.
+  // 9. Graceful shutdown — close the DB connection before exit.
   const shutdown = () => {
     process.stdout.write('\nShutting down af serve...\n');
+    try {
+      db.close();
+    } catch { /* best-effort */ }
     server.close(() => process.exit(0));
     setTimeout(() => {
       process.stderr.write('Forced exit after timeout.\n');

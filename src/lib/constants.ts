@@ -110,6 +110,15 @@ export const AF_SERVICE_PORT_DEFAULT = 4150;
 export const AF_SERVICE_DB_DEFAULT = join(GLOBAL_DIR, 'service.db');
 
 /**
+ * AF-53 (§8, Decision 10): default retention in days for the SQLite store.
+ * `0` = keep everything (audit-first default; nothing is ever pruned). A positive
+ * value prunes only terminal `dispatch_jobs` and their `job_events` older than N
+ * days on a boot-time + daily sweep; `request_log` is NEVER auto-pruned.
+ * Overridable via AF_SERVICE_RETENTION_DAYS env / `service.retentionDays` config.
+ */
+export const AF_SERVICE_RETENTION_DAYS_DEFAULT = 0;
+
+/**
  * AF-42 (§8 SSRF guard): allow-list of hosts a local `execution.endpoint` may
  * target. Operator-set agent files could otherwise point the dispatcher at an
  * arbitrary internal service. Entries are matched case-insensitively; a leading

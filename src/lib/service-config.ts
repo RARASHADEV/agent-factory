@@ -10,6 +10,7 @@ import {
   AF_MAX_CONCURRENCY_DEFAULT,
   AF_SERVICE_PORT_DEFAULT,
   AF_SERVICE_DB_DEFAULT,
+  AF_SERVICE_RETENTION_DAYS_DEFAULT,
 } from './constants.js';
 import type { ServiceConfig } from './config.js';
 
@@ -22,6 +23,8 @@ export interface ResolvedServiceConfig {
   allowPublic: boolean;
   maxConcurrency: number;
   db: string;
+  /** Retention in days (Decision 10). 0 = keep everything; positive = prune terminal jobs/events. */
+  retentionDays: number;
 }
 
 /** Parse a boolean-ish env/config value. Only "true"/"1" (case-insensitive) is true. */
@@ -63,6 +66,10 @@ export function resolveServiceConfig(
       AF_MAX_CONCURRENCY_DEFAULT,
     ),
     db: env.AF_SERVICE_DB ?? cfg?.db ?? AF_SERVICE_DB_DEFAULT,
+    retentionDays: asInt(
+      env.AF_SERVICE_RETENTION_DAYS ?? cfg?.retentionDays,
+      AF_SERVICE_RETENTION_DAYS_DEFAULT,
+    ),
   };
 }
 

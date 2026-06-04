@@ -162,6 +162,15 @@ describe('resolveServiceConfig', () => {
     assert.equal(r.port, 4150);
     assert.equal(r.maxConcurrency, 20);
   });
+
+  it('retentionDays defaults to 0 (keep everything); env + config resolve (§8, Decision 10)', () => {
+    assert.equal(resolveServiceConfig(undefined, {}).retentionDays, 0);
+    assert.equal(resolveServiceConfig({ retentionDays: 30 }, {}).retentionDays, 30);
+    assert.equal(
+      resolveServiceConfig({ retentionDays: 30 }, { AF_SERVICE_RETENTION_DAYS: '7' }).retentionDays,
+      7,
+    );
+  });
 });
 
 // ── Router dispatch / GET /health ────────────────────────────────────────────
@@ -194,6 +203,7 @@ const CFG: ResolvedServiceConfig = {
   allowPublic: false,
   maxConcurrency: 20,
   db: '/tmp/service.db',
+  retentionDays: 0,
 };
 
 describe('router dispatch', () => {
