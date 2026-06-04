@@ -267,8 +267,12 @@ describe('router dispatch', () => {
 // ── Flag-off behavior ────────────────────────────────────────────────────────
 
 describe('ENABLE_AF_53 flag', () => {
-  it('defaults to false (no listener opened at command entry)', async () => {
+  it('is a boolean gate checked at command entry (value is a deploy decision)', async () => {
+    // ENABLE_AF_53 gates whether `af serve` opens a listener. Its VALUE is an
+    // intentional deployment choice (flipped to true by AF-61 for the Hanuman
+    // deploy), so we assert the gate exists and is a boolean rather than pinning
+    // a specific value — pinning it broke the moment the service went live.
     const { ENABLE_AF_53 } = await import('../lib/constants.js');
-    assert.equal(ENABLE_AF_53, false);
+    assert.equal(typeof ENABLE_AF_53, 'boolean');
   });
 });
